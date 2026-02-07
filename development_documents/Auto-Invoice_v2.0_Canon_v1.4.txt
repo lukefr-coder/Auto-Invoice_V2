@@ -1,0 +1,350 @@
+AUTO-INVOICE V2 — CANON
+======================
+
+Version: v2.0
+Status: AUTHORITATIVE
+Scope:
+This document defines all non-negotiable behavioral rules for
+Auto-Invoice V2. If code violates this Canon, it is a bug.
+
+============================================================
+1. CORE PHILOSOPHY
+============================================================
+- The system is intentionally simple, deterministic, and explicit.
+- Files are disposable; user intent is final.
+- No silent overwrites.
+- No implicit merges.
+- No inferred decisions.
+- All destructive actions must be user-initiated and visible.
+- Given identical filesystem + persisted state, behavior must be
+  identical across restarts.
+
+============================================================
+2. FOLDER MODEL
+============================================================
+
+2.1 Source
+- Input-only folder.
+- Contains unprocessed files only.
+- Files remain until:
+  - Deposited
+  - Unified (loser quarantined)
+  - Explicitly deleted by user action.
+
+2.2 Destination
+- Append-only by policy.
+- Treated as read-only by the app.
+- The app must NEVER overwrite an existing file.
+
+2.3 Export Folder
+- User-selected folder for Excel output.
+
+2.4 Quarantine
+- Subfolder inside Source named `_quarantine`.
+- Excluded from watching and OCR.
+- Used to hold “loser” files from Unify actions.
+- Files here are inert unless manually reintroduced by the user.
+
+2.5 Folder Names
+- Folder names and spelling are irrelevant.
+- Logic must not depend on folder naming.
+
+============================================================
+3. VISIBILITY RULES
+============================================================
+- Files MUST NOT appear in the grid until Phase-1 OCR succeeds
+  and the file is renamed.
+- Original or stale filenames must NEVER appear.
+- Files silently skipped (fingerprint duplicates) must NEVER
+  appear in the UI.
+
+============================================================
+4. OCR MODEL
+============================================================
+
+------------------------
+4.1 Phase-1 OCR (Rename Pass)
+------------------------
+Purpose:
+- Identify document.
+- Determine file type.
+- Rename file deterministically.
+
+Rules:
+- Triggered automatically via Source folder watching.
+- Operates in discrete batches:
+  - A batch processes all files present at batch start.
+  - Files added mid-batch wait for the next batch.
+- Page 1 ONLY.
+- Phase-1 extracts ONLY:
+  - doc_no
+  - file_type
+- File is renamed immediately after successful extraction.
+- UI row is created ONLY after rename succeeds.
+
+Failure:
+- If doc_no fails → doc_no = "!" → Review.
+- If file_type fails → file_type = "!" → Review.
+
+Duplicates:
+- If fingerprint is identical to a known fingerprint:
+  - File is deleted silently.
+  - No UI row is created.
+  - No Review is entered.
+
+------------------------
+4.2 Credit File Detection (Special Case)
+------------------------
+- Phase-1 first attempts standard file-type ROI.
+- If no non-Credit type is found:
+  - A secondary ROI is scanned for Credit keyword.
+- If Credit is confirmed:
+  - doc_no is searched in Credit-specific coordinates.
+
+Handwritten Credit Numbers:
+- If doc_no appears handwritten (non-OCR text):
+  - Do NOT attempt recognition.
+  - doc_no = "!"
+  - Row enters Review.
+- Manual input is required.
+
+------------------------
+4.3 Phase-2 OCR (Export Pass)
+------------------------
+Purpose:
+- Populate export data ONLY when requested.
+
+Rules:
+- Runs ONLY on rows ticked for export.
+- May operate on files located in Destination.
+- Phase-2 extracts:
+  - account
+  - date
+  - total
+- Missing or failed fields export as blank.
+- No automatic re-OCR.
+- Calibration changes do NOT trigger re-OCR.
+
+============================================================
+5. FILE IDENTITY & CACHING
+============================================================
+- New files detected via lightweight metadata.
+- SHA-256 fingerprint computed only when OCR worker starts.
+- Fingerprint duplicates are skipped and deleted.
+- Identity decisions must not depend on folder names.
+
+============================================================
+6. FILE NAMING RULES
+============================================================
+- Displayed name:
+  - Stem only (no .pdf).
+- Disk name:
+  - Includes .pdf.
+
+Format:
+- DOCNO
+- DOCNO(1)…DOCNO(9)
+
+Rename Dialog:
+- Brackets are locked.
+- User inputs numeric suffix only.
+- App auto-suggests next suffix based on:
+  - Current Source contents
+  - Used-names registry (best-effort)
+
+Credits:
+- Prefer suffix (1).
+- Auto-bump upward.
+- If exhausted → Review.
+
+============================================================
+7. FILE TYPES
+============================================================
+
+Canonical Types (displayed in rows):
+- Tax Invoice
+- Order
+- Proforma
+- Transfer
+- Credit
+
+Abbreviations (headers only):
+- Tx, Or, Pf, Tr, Cr
+
+============================================================
+8. STATUS STATES
+============================================================
+Only three states exist:
+
+- Ready
+  - File renamed.
+  - No blocking issues.
+  - Eligible for deposit.
+
+- Review
+  - User action required.
+  - Row background = yellow.
+
+- Processed
+  - File resolved and deposited or unified.
+  - Row text = blue.
+
+============================================================
+9. COLLISION RULES
+============================================================
+
+------------------------
+9.1 Source–Source
+------------------------
+- Two Source files resolve to same stem name.
+- Both enter Review.
+
+Rename:
+- Applies suffix.
+- Becomes Ready if unique.
+
+Unify:
+- User-selected winner kept.
+- Loser moved to `_quarantine`.
+- Loser renamed to a non-stem quarantine-safe name.
+- Loser fingerprint record cleared.
+- Winner becomes Ready.
+
+------------------------
+9.2 Source–Destination
+------------------------
+- Detected only at deposit time.
+
+Rename:
+- Source renamed.
+- Becomes Ready.
+
+Unify:
+- Source moved to `_quarantine`.
+- Row becomes Processed.
+- Destination file remains untouched.
+
+============================================================
+10. MANUAL INPUT
+============================================================
+- Allowed for ALL fields.
+- Right-click → Manual Input.
+- PDF viewer shown with labeled input.
+
+Validation:
+- doc_no: ^[0-9]{6}([A-Z])?$
+- account: ^[A-Z][0-9]{4}$
+
+Behavior:
+- Manual doc_no triggers immediate rename.
+- If collision → blocked → remains Review.
+
+============================================================
+11. DEPOSIT
+============================================================
+- Disabled while Phase-1 OCR is running.
+- Deposits ALL Ready rows.
+- Ticks do NOT affect deposit.
+
+Failure:
+- Continue with remaining files.
+- Failed row → Review with reason.
+
+Post-conditions:
+- Source contains no Ready files.
+- Successful rows → Processed (blue text).
+
+============================================================
+12. EXPORT
+============================================================
+Eligibility:
+- Tax Invoice
+- Proforma
+
+Rules:
+- Checkboxes enabled only for eligible types.
+- Checkboxes allowed for Ready OR Processed rows.
+- Review rows never exportable.
+
+Output:
+- Excel only.
+- One file per click.
+- Filename:
+  "QLD Eftpos <mode_date>.xls"
+- Date format: dd.mm.yy
+- Mode date = most common extracted date.
+- Missing values export blank.
+
+Columns:
+1. Date
+2. Account
+3. Invoice Number
+4. Amount
+
+============================================================
+13. STATUS TEXT
+============================================================
+- No idle text.
+- Appears only during activity.
+
+During work:
+- Black text.
+- Animated ellipsis.
+- Throttled updates.
+
+Success:
+- Blue text.
+- Clears automatically.
+
+Errors:
+- Black text.
+- Persistent until next action.
+
+============================================================
+14. PROCESSED HISTORY & USED NAMES
+============================================================
+
+Processed Ledger:
+- Visible history capped at 500 rows.
+- Oldest pruned first.
+- UI history only.
+
+Used-Names Registry:
+- Separate lightweight structure.
+- Persists longer than visible ledger.
+- Used ONLY for best-effort suffix suggestion.
+- Cleared by Soft Reset.
+
+============================================================
+15. RESET
+============================================================
+Soft Reset:
+- Clears:
+  - Processed ledger
+  - Used-names registry
+  - OCR caches
+- Preserves:
+  - Folder selections
+  - Calibration data
+
+============================================================
+16. CALIBRATION
+============================================================
+- Default calibration preloaded by developer.
+- User adjustments affect future files only.
+- Not an error-correction tool.
+- No automatic re-OCR.
+- OCR snapshot view available for diagnostics.
+
+============================================================
+17. APP LIFECYCLE
+============================================================
+- Source folder live-watched.
+- `_quarantine` excluded from watching.
+- OCR continues regardless of Review rows.
+- Closing app cancels workers gracefully.
+- State persisted in AppData.
+
+============================================================
+END OF CANON
+============================================================

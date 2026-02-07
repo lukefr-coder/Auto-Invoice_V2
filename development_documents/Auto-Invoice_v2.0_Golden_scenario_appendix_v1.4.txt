@@ -1,0 +1,341 @@
+AUTO-INVOICE V2 — GOLDEN SCENARIO APPENDIX
+=========================================
+
+Version: v2.0
+Status: AUTHORITATIVE
+Purpose:
+Golden Scenarios define the canonical behaviors that MUST ALWAYS WORK.
+If a change breaks a Golden Scenario, it is a regression and must be rolled back.
+
+============================================================
+GS-0 — EMPTY STARTUP
+============================================================
+Given:
+- App launched
+- Source folder empty
+- No persisted state
+
+Expect:
+- Grid empty
+- No status text
+- Deposit disabled
+- Export disabled
+- No OCR activity
+
+============================================================
+GS-1 — SINGLE FILE, CLEAN PATH
+============================================================
+Given:
+- One PDF dropped into Source
+- File is a Tax Invoice
+- doc_no readable
+- No collisions
+
+Expect:
+- Phase-1 OCR runs
+- File renamed to stem name
+- Row appears only AFTER rename
+- Status = Ready
+- Deposit enabled
+- No Review
+
+============================================================
+GS-2 — MULTIPLE FILES, OCR ORDER
+============================================================
+Given:
+- 10 PDFs dropped at once
+- All valid and unique
+
+Expect:
+- Phase-1 OCR runs in batch
+- Rows appear in OCR completion order
+- No stale filenames ever shown
+- All rows Ready
+
+============================================================
+GS-3 — FILES DROPPED MID-BATCH
+============================================================
+Given:
+- 10 PDFs already processing
+- 5 more dropped during OCR
+
+Expect:
+- First batch completes uninterrupted
+- Second batch starts automatically
+- New files not visible until renamed
+- Order preserved within each batch
+
+============================================================
+GS-4 — SOURCE–SOURCE COLLISION (S2)
+============================================================
+Given:
+- Two Source files resolve to same doc_no
+- Different fingerprints
+
+Expect:
+- Both rows enter Review
+- Yellow row background
+- Deposit ignores both
+
+============================================================
+GS-5 — SOURCE–SOURCE UNIFY (S2)
+============================================================
+Given:
+- Two Source files in Review (S2)
+- User selects Unify on one
+
+Expect:
+- Selected file kept
+- Loser moved to Source/_quarantine
+- Loser renamed to QUAR_* non-stem name
+- Loser fingerprint cleared
+- Winner becomes Ready
+- Deposit allowed
+
+============================================================
+GS-6 — SOURCE–SOURCE RENAME (S2)
+============================================================
+Given:
+- Two Source files in Review (S2)
+- User selects Rename
+
+Expect:
+- Suffix dialog opens
+- Auto-suggest next suffix
+- After rename:
+  - If unique → Ready
+  - If collision → remains Review
+
+============================================================
+GS-7 — IDENTICAL FINGERPRINT DUPLICATE
+============================================================
+Given:
+- Two identical PDFs dropped
+
+Expect:
+- First file processed normally
+- Second file silently deleted
+- No Review
+- No UI row created for duplicate
+
+============================================================
+GS-8 — SOURCE–DESTINATION COLLISION (S1–D1)
+============================================================
+Given:
+- One Ready Source file
+- Destination already contains same filename
+- Deposit attempted
+
+Expect:
+- Deposit halted for that file only
+- Row enters Review
+- Review UI shows:
+  - Source PDF (left)
+  - Destination PDF (right)
+
+============================================================
+GS-9 — S1–D1 UNIFY
+============================================================
+Given:
+- Source–Destination Review
+- User selects Unify
+
+Expect:
+- Source file moved to _quarantine
+- Destination file untouched
+- Row becomes Processed
+- Row text blue
+- No file moved to Destination
+
+============================================================
+GS-10 — S1–D1 RENAME
+============================================================
+Given:
+- Source–Destination Review
+- User selects Rename
+
+Expect:
+- Suffix dialog opens
+- Auto-suggest next suffix
+- After rename:
+  - Row becomes Ready
+  - Deposit allowed again
+
+============================================================
+GS-11 — CREDIT NOTE DETECTION
+============================================================
+Given:
+- Credit note PDF
+- Primary type ROI does not match
+- Secondary Credit ROI matches
+
+Expect:
+- file_type = Credit
+- doc_no searched in credit-specific ROI
+
+============================================================
+GS-12 — HANDWRITTEN CREDIT DOC NO
+============================================================
+Given:
+- Credit note
+- doc_no handwritten
+
+Expect:
+- OCR does NOT attempt recognition
+- doc_no = "!"
+- Row enters Review
+- Manual input required
+
+============================================================
+GS-13 — MANUAL INPUT (ANY FIELD)
+============================================================
+Given:
+- Row in Review
+- User right-clicks field → Manual Input
+
+Expect:
+- PDF viewer shown
+- Field labeled
+- Validation enforced
+- On success:
+  - Rename occurs if doc_no
+  - Collision rules apply
+
+============================================================
+GS-14 — DEPOSIT MIXED STATES
+============================================================
+Given:
+- Some rows Ready
+- Some rows Review
+
+Expect:
+- Deposit moves ONLY Ready rows
+- Review rows ignored
+- Successful rows → Processed
+- Source emptied of Ready files only
+
+============================================================
+GS-15 — EXPORT ELIGIBILITY
+============================================================
+Given:
+- Mixed file types
+- Mixed statuses
+
+Expect:
+- Checkboxes enabled ONLY for:
+  - Tax Invoice
+  - Proforma
+- Checkboxes allowed for Ready + Processed
+- Review rows never exportable
+
+============================================================
+GS-16 — EXPORT AFTER DEPOSIT
+============================================================
+Given:
+- Files already deposited
+- Destination contains thousands of files
+- Rows are Processed
+
+Expect:
+- Phase-2 OCR reads from Destination paths
+- Export works without Source involvement
+
+============================================================
+GS-17 — EXPORT OUTPUT
+============================================================
+Given:
+- Multiple rows ticked
+- Some missing data
+
+Expect:
+- One Excel file generated
+- Filename:
+  "QLD Eftpos <mode_date>.xls"
+- Date = most common extracted date
+- Missing fields exported blank
+- Column order preserved
+
+============================================================
+GS-18 — STATUS TEXT BEHAVIOR
+============================================================
+Given:
+- OCR running
+
+Expect:
+- Status text visible
+- Black text
+- Animated ellipsis
+
+After success:
+- Blue success text
+- Auto-clears
+
+Idle:
+- No status text
+
+============================================================
+GS-19 — FILTERING
+============================================================
+Given:
+- Mixed statuses and types
+
+Expect:
+- Clicking Status header cycles filters
+- Clicking Type header cycles filters
+- Default on launch = (All)
+
+============================================================
+GS-20 — PROCESSED LEDGER PRUNING
+============================================================
+Given:
+- >500 processed rows
+
+Expect:
+- Oldest rows pruned from UI history
+- Destination files untouched
+- Used-names registry still assists suffix suggestion
+
+============================================================
+GS-21 — SOFT RESET
+============================================================
+Given:
+- App with history, cache, OCR state
+
+When:
+- User clicks Reset
+
+Expect:
+- Processed ledger cleared
+- Used-names registry cleared
+- OCR caches cleared
+- Folder selections preserved
+- Calibration preserved
+
+============================================================
+GS-22 — QUARANTINE REINTRODUCTION
+============================================================
+Given:
+- File previously quarantined
+- User moves it back into Source
+
+Expect:
+- Treated as brand-new file
+- Phase-1 OCR runs
+- No silent deletion
+- Normal collision rules apply
+
+============================================================
+GS-23 — APP RESTART CONSISTENCY
+============================================================
+Given:
+- App closed and reopened mid-project
+
+Expect:
+- Folder selections restored
+- Processed ledger restored (up to 500)
+- No resolved items reappear in Review
+- Deterministic behavior
+
+============================================================
+END OF GOLDEN SCENARIO APPENDIX
+============================================================

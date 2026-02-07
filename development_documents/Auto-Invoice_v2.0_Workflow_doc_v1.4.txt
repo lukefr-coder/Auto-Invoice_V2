@@ -1,0 +1,352 @@
+AUTO-INVOICE V2 — WORKFLOW (FOUNDATION + DEBUG + PATCH)
+=====================================================
+
+Version: v2.1
+Owner intent:
+- Luke is the designer / decision-maker.
+- ChatGPT is the planner + prompt-writer + workflow driver.
+- Copilot ASK is the code-reader / diagnostician.
+- Copilot AGENT is the implementer.
+
+Primary goal:
+Build Auto-Invoice V2 cleanly (foundation-first), then debug and extend
+without regressions, without chaos, and without “mystery state”.
+
+This document is authoritative. Deviations must be explicit and justified.
+
+
+============================================================
+0. NORTH STARS
+============================================================
+1) Foundation before polish
+- No polish features (micro UX, extra buttons, “nice to have” tweaks)
+  until core pipeline is stable.
+
+2) One change per iteration
+- One issue or one slice per prompt.
+- If regression is detected: rollback/revert immediately.
+
+3) Spec-first development
+- Canon defines law; Design defines blueprint; Golden Scenarios define proof.
+- If behavior changes, docs change first (or same commit), then code.
+
+4) Deterministic, audit-friendly behavior
+- No hidden state.
+- If the UI shows a row as resolved, it must be resolved in behavior.
+- Folder names must not affect correctness.
+
+5) Efficiency over back-and-forth
+- No drip feeding single commands for hours.
+- Gather evidence in one “evidence pack” when runtime data is needed.
+
+
+============================================================
+1. DOCUMENT HIERARCHY (AUTHORITY ORDER)
+============================================================
+1) CANON
+- Non-negotiable behavior rules.
+- If code conflicts with Canon, code is wrong.
+
+2) DESIGN DOCUMENT
+- How Canon is implemented (architecture + UI + flow).
+- If Design conflicts with Canon, Design must be corrected.
+
+3) GOLDEN SCENARIOS
+- Regression suite of behaviors that must always hold.
+- If a change breaks a Golden Scenario, it is invalid.
+
+4) WORKFLOW (this document)
+- How we build/debug safely and efficiently.
+
+
+============================================================
+2. ROLES
+============================================================
+LUKE (Designer / Operator)
+- Defines intended behavior and priorities.
+- Runs the app, performs tests, and provides runtime evidence when needed.
+- Does not hand-edit code.
+
+CHATGPT (Planner / Prompt Author)
+- Converts intent into precise scope and constraints.
+- Enforces “one issue per iteration”.
+- Decides whether to use Copilot ASK vs Copilot AGENT.
+- Writes prompts that are copy/paste ready and unambiguous.
+- Requests runtime evidence only when required, bundled as one pack.
+
+COPILOT ASK (Code Reader / Diagnosis Only)
+- Reads the repo to trace current behavior.
+- Identifies root cause and minimal fix options.
+- Must not implement changes.
+
+COPILOT AGENT (Implementer)
+- Applies targeted code changes per the prompt.
+- Must meet Definition of Done.
+- Must not do extra refactors or “helpful additions” beyond scope.
+- Must not change behavior not requested.
+
+
+============================================================
+3. TWO MODES OF WORK
+============================================================
+
+MODE A — FOUNDATION BUILD (FROM SCRATCH)
+- Used when building the app in clean vertical slices.
+- Each slice ends with:
+  - explicit Definition of Done
+  - at least one Golden Scenario pass relevant to that slice
+  - a checkpoint commit/tag
+
+MODE B — DEBUG + PATCH
+- Used when fixing a bug or regression.
+- Always one issue per iteration.
+- Always revert on regression.
+
+
+============================================================
+4. FOUNDATION SLICE ORDER (MANDATORY DEFAULT)
+============================================================
+This is the recommended build order. We do not skip ahead unless there
+is a strong reason.
+
+Slice 1 — UI Shell + Persistence
+- Window, grid, folder pickers, buttons (mostly disabled),
+  filter header cycling, status area.
+- AppData persistence for folder selections.
+
+Slice 2 — Row Model + UI Binding
+- Canonical Row object, statuses, stable ordering rules,
+  minimal UI updates pipeline (no OCR yet).
+- Add “fake rows” injection path for testing.
+
+Slice 3 — Watcher + Batching (No OCR)
+- Watch Source; exclude _quarantine.
+- Batch boundaries and “new files after batch” logic.
+- Still fake processing; validate pipeline.
+
+Slice 4 — Phase-1 OCR (Rename + Type)
+- Worker pool; ROI-only; page 1 only.
+- Rows appear only after rename.
+- Credit type fallback ROI + credit doc ROI routing.
+- Handwritten credit behavior implemented via conservative acceptance.
+
+Slice 5 — Review UI + Resolutions
+- Review dialog: S2 (source/source) and S1–D1 (source/dest) compare views.
+- Manual input, rename dialog, unify with quarantine loser + fingerprint clear.
+
+Slice 6 — Deposit
+- Move all Ready to Destination; handle failures; S1–D1 collisions at deposit.
+
+Slice 7 — Export + Phase-2 OCR
+- Eligibility (Tax Invoice + Proforma).
+- Tickboxes allowed for Ready and Processed.
+- Phase-2 OCR reads from Destination if Processed.
+- Excel output.
+
+Slice 8 — Reset + Diagnostics + Calibration (future-only tool)
+- Soft reset semantics.
+- Copy Debug Data.
+- Calibration UI stub and persistence (future-only; no re-OCR).
+
+
+============================================================
+5. DOC-GATED CHANGES (NON-NEGOTIABLE)
+============================================================
+If a requested change affects behavior:
+- Update Canon/Design/Golden Scenarios first (or same commit),
+  then implement.
+
+If a requested change is purely UI layout or phrasing:
+- Update Design only.
+
+If a requested change adds a new regression risk:
+- Add or update a Golden Scenario.
+
+No “silent” behavior changes in code without docs.
+
+
+============================================================
+6. STANDARD LOOP (DEBUG + PATCH)
+============================================================
+STEP 0 — Problem Statement (Luke → ChatGPT)
+Luke provides:
+- Observed behavior
+- Intended behavior
+- Minimal reproduction scenario
+- Whether it is new/regression
+
+STEP 1 — One-shot Evidence Pack (only if runtime data needed)
+ChatGPT requests ONE paste containing:
+- Copy Debug Data output (preferred)
+- Any essential extras (bundled once)
+
+Rules:
+- Do not ask Luke to paste code.
+- Do not ask for ten separate command outputs across messages.
+
+STEP 2 — Copilot ASK (Diagnosis)
+ChatGPT writes ONE ASK prompt:
+- Names likely files/functions
+- Requests logic trace: conditions and state transitions
+- Identifies minimal safe fix options
+
+Luke pastes ASK results once.
+
+STEP 3 — Copilot AGENT (Implementation)
+ChatGPT writes ONE AGENT prompt:
+- Short summary (2–4 lines)
+- Intended fix bullets (explicit)
+- Files/functions to change
+- Definition of Done
+- Regression guards
+
+STEP 4 — Verification Test (Luke)
+ChatGPT defines ONE test:
+- Steps
+- Pass/fail outcomes
+- Debug snapshot after
+
+STEP 5 — Closeout
+If fixed:
+- Commit + tag/checkpoint
+- Update docs only if behavior spec changed
+
+If regression:
+- Revert immediately
+- Repeat loop
+
+
+============================================================
+7. COPILOT USAGE RULES (ASK vs AGENT)
+============================================================
+
+Use Copilot ASK when:
+- The answer is in the codebase.
+- You need to trace “who decides Ready vs Review”,
+  “who moves to quarantine”, “who prunes ledgers”, etc.
+
+ASK prompt rules:
+- Diagnosis only.
+- Must cite file/function names.
+- Must not implement.
+
+Use Copilot AGENT when:
+- Diagnosis is understood.
+- Scope is tight.
+- Definition of Done is written.
+
+AGENT prompt rules:
+- One issue / one slice only.
+- No refactors unless explicitly requested.
+- No new features unless explicitly requested.
+- Must follow Canon and Design constraints.
+
+----------------------------------------------------------------
+7.1 AGENT PROMPT SELF-CONTAINMENT REQUIREMENT (NEW)
+----------------------------------------------------------------
+Copilot AGENT has NO access to:
+- Canon
+- Design Document
+- Golden Scenarios
+- Workflow
+- Prior chat context
+- Shared project vocabulary
+
+Therefore:
+
+- ALL Copilot AGENT prompts MUST be fully self-contained.
+- Any domain term used (e.g. “Ready”, “Review”, “Processed”, “row”,
+  “deposit”, “unify”, “slice”) MUST be explicitly defined in plain
+  language within the prompt.
+- Prompts MUST NOT rely on phrases such as:
+  “as per Canon”, “as designed”, “according to workflow”, or
+  assumed shared understanding.
+- Prompts MUST describe intended behavior in observable terms:
+  UI appearance, file movement, state transitions, and constraints.
+- Negative scope (“do not implement”) MUST be explicitly listed.
+
+If a term is not defined in the prompt, the agent is not allowed
+to guess its meaning. Ambiguity is treated as a prompt error.
+
+
+============================================================
+8. DEFINITION OF DONE (DOD) TEMPLATE
+============================================================
+Each slice/patch must include a DoD like:
+
+- App launches without errors.
+- Feature X works as specified.
+- Golden Scenarios GS-__ and GS-__ pass.
+- No change to unrelated behaviors (list key guards).
+- Debug output still works (if implemented).
+- Commit made and tag/checkpoint created.
+
+If DoD is not met, the change is incomplete.
+
+
+============================================================
+9. REGRESSION POLICY (HARD)
+============================================================
+- If a regression is detected:
+  - Revert/rollback immediately.
+  - Do not patch-forward.
+  - Re-run the last known-good scenario.
+- Only after returning to stable do we attempt a new fix.
+
+
+============================================================
+10. CHECKPOINTING / VERSION CONTROL
+============================================================
+- Commit at the end of each slice.
+- Tag the commit with a clear name:
+  - slice_01_ui_shell_stable
+  - slice_04_phase1_ocr_stable
+  - fix_s1d1_unify_quarantine_stable
+
+- Keep a rolling “stable” branch/tag.
+- If something goes wrong, return to the last tag.
+
+
+============================================================
+11. PERFORMANCE RULES (GUARDS)
+============================================================
+- Never OCR on the UI thread.
+- UI updates throttled (avoid full-grid redraw loops).
+- OCR uses small ROIs; page 1 only.
+- Worker pool capped unless measured otherwise.
+- No auto re-OCR.
+- _quarantine excluded from watcher always.
+
+
+============================================================
+12. STATE / CACHES / RESET RULES
+============================================================
+- Processed ledger is capped (UI history).
+- Used-names registry is separate, longer-lived, best-effort only.
+- Soft Reset clears:
+  - processed ledger
+  - used-names registry
+  - OCR caches
+- Soft Reset preserves:
+  - folder selections
+  - calibration data
+
+
+============================================================
+13. PROMPT FORMAT RULES (CHATGPT OUTPUT)
+============================================================
+For any Copilot AGENT prompt:
+- Must be fully self-contained (see §7.1).
+- Must start with a short summary.
+- Must include explicit intended-fix bullets.
+- Must include scope boundaries (“do not change X”).
+- Must include Definition of Done and regression guards.
+
+For any document regeneration:
+- Only generate when Luke explicitly asks.
+- Always generate FULL documents.
+- Output must be copy-paste safe.
+
+============================================================
+END OF WORKFLOW
+============================================================

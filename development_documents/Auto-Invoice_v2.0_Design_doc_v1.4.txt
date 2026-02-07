@@ -1,0 +1,385 @@
+AUTO-INVOICE V2 — DESIGN DOCUMENT
+================================
+
+Version: v2.0
+Status: IMPLEMENTATION-READY
+Authority: Must conform to AUTO-INVOICE V2 CANON v2.0
+
+============================================================
+1. PURPOSE
+============================================================
+This document defines:
+- UI layout and behavior
+- Internal architectural structure
+- Data flow between components
+- Background processing model
+- Performance and responsiveness guarantees
+
+This document answers:
+“How is the Canon implemented in a clean, readable, professional way?”
+
+============================================================
+2. HIGH-LEVEL ARCHITECTURE
+============================================================
+
+The application is divided into THREE strict layers:
+
+1) UI Layer
+2) Domain / Core Logic
+3) Services / Side-Effects
+
+RULES:
+- UI MUST NOT perform filesystem, OCR, or persistence logic.
+- Services MUST NOT directly manipulate UI widgets.
+- Domain logic MUST be deterministic and testable.
+
+------------------------------------------------------------
+2.1 Module Overview
+------------------------------------------------------------
+
+app/
+│
+├─ main.py                # App bootstrap + lifecycle
+│
+├─ ui/
+│  ├─ window.py           # Main window layout
+│  ├─ grid.py             # Table/grid rendering & filters
+│  ├─ dialogs.py          # Rename, manual input, review dialogs
+│  └─ status_bar.py       # Bottom status text handling
+│
+├─ core/
+│  ├─ row_model.py        # Row object + state transitions
+│  ├─ collisions.py       # Rename / unify decision logic
+│  ├─ naming.py           # Stem + suffix rules
+│  ├─ batching.py         # OCR batch boundaries
+│  └─ filters.py          # Status/type filtering logic
+│
+├─ services/
+│  ├─ watcher.py          # Source folder monitoring
+│  ├─ ocr_phase1.py       # Rename OCR
+│  ├─ ocr_phase2.py       # Export OCR
+│  ├─ deposit.py          # Move to destination
+│  ├─ quarantine.py       # Quarantine handling
+│  └─ export.py           # Excel generation
+│
+├─ state/
+│  ├─ persistence.py      # AppData state
+│  ├─ ledger.py           # Processed rows history
+│  ├─ used_names.py       # Suffix suggestion registry
+│  └─ fingerprint.py      # File identity cache
+│
+├─ util/
+│  ├─ hashing.py
+│  ├─ paths.py
+│  ├─ logging.py
+│  └─ threading.py
+│
+└─ config/
+   └─ defaults.json       # Default OCR calibration
+
+============================================================
+3. UI DESIGN
+============================================================
+
+------------------------------------------------------------
+3.1 Main Window Layout
+------------------------------------------------------------
+
+Top → Bottom flow:
+
+1) Input (Source)
+2) Options
+3) Files Grid
+4) Output (Destination)
+5) Status Bar
+
+This order mirrors the user’s mental model.
+
+------------------------------------------------------------
+3.2 Input Section
+------------------------------------------------------------
+- Source folder path text field
+- Browse button
+
+Behavior:
+- Selecting a folder immediately starts watching.
+- `_quarantine` subfolder is automatically excluded.
+
+------------------------------------------------------------
+3.3 Options Section
+------------------------------------------------------------
+- Export (.xls) button
+- Export folder selector ("...")
+- Calibration (gear icon)
+
+Rules:
+- Calibration is an advanced tool.
+- Calibration changes apply only to future OCR.
+- Export button disabled if no eligible rows are ticked.
+
+------------------------------------------------------------
+3.4 Files Grid
+------------------------------------------------------------
+
+Columns (left → right):
+[✓] | File | Type | Date | Account | Total | Status
+
+- Status column remains last (visual preference).
+- Column headers support filtering.
+
+------------------------------------------------------------
+3.5 Filtering
+------------------------------------------------------------
+
+Clicking column headers cycles filters:
+
+Status:
+(All) → Ready → Review → Processed → (All)
+
+Type:
+(All) → Tax Invoice → Order → Proforma → Transfer → Credit → (All)
+
+Header text shows shorthand:
+Type (Tx / Or / Pf / Tr / Cr)
+
+------------------------------------------------------------
+3.6 Row Visual Rules
+------------------------------------------------------------
+
+- Ready:
+  - Normal text
+  - No background color
+
+- Review:
+  - Yellow row background
+
+- Processed:
+  - Blue text
+  - Normal background
+
+------------------------------------------------------------
+3.7 Checkboxes
+------------------------------------------------------------
+
+Checkbox enabled ONLY if:
+- File type ∈ {Tax Invoice, Proforma}
+- Status ∈ {Ready, Processed}
+
+Checkbox disabled if:
+- Status = Review
+- File type not exportable
+
+------------------------------------------------------------
+3.8 Review UI
+------------------------------------------------------------
+
+Review dialog shows:
+- Left pane: Source PDF
+- Right pane:
+  - Source PDF (S2)
+  - Destination PDF (S1–D1)
+
+Actions:
+- Rename
+- Unify
+
+------------------------------------------------------------
+3.9 Status Bar
+------------------------------------------------------------
+
+- No idle text
+- Black text for in-progress
+- Blue text for success
+- Errors persist until next action
+
+============================================================
+4. DATA MODEL
+============================================================
+
+------------------------------------------------------------
+4.1 Row Object
+------------------------------------------------------------
+
+Each file corresponds to one Row:
+
+Fields:
+- id (internal UUID)
+- doc_no
+- stem_name
+- file_type
+- date
+- account
+- total
+- status (Ready / Review / Processed)
+- source_path
+- dest_path (optional)
+- fingerprint
+- ocr_state
+
+Row objects are immutable except through explicit transitions.
+
+------------------------------------------------------------
+4.2 Status Transitions
+------------------------------------------------------------
+
+Rename success → Ready  
+OCR failure → Review  
+Rename resolution → Ready  
+Deposit success → Processed  
+Unify resolution → Ready or Processed
+
+============================================================
+5. OCR DESIGN
+============================================================
+
+------------------------------------------------------------
+5.1 Phase-1 OCR
+------------------------------------------------------------
+
+Triggered by:
+- Source watcher detecting new files.
+
+Batching:
+- Files present at batch start only.
+- New files wait for next batch.
+
+Processing:
+- Page 1 only.
+- Small ROIs only.
+- Extract:
+  - doc_no
+  - file_type
+
+Credit Detection:
+- Primary ROI → non-Credit
+- Fallback ROI → Credit
+- Credit doc_no ROI is unique.
+
+Handwritten Credit:
+- If OCR confidence low or text malformed:
+  - doc_no = "!"
+  - Review
+
+------------------------------------------------------------
+5.2 Phase-2 OCR
+------------------------------------------------------------
+
+Triggered by:
+- Export click
+
+Processing:
+- Only ticked rows
+- Operates on Source or Destination
+- No automatic re-OCR
+
+============================================================
+6. COLLISION HANDLING
+============================================================
+
+------------------------------------------------------------
+6.1 Source–Source
+------------------------------------------------------------
+
+Condition:
+- Two files resolve to same stem name.
+
+Resolution:
+- Rename → suffix → Ready
+- Unify:
+  - Winner kept
+  - Loser quarantined
+  - Fingerprint cleared
+
+------------------------------------------------------------
+6.2 Source–Destination
+------------------------------------------------------------
+
+Detected at deposit time only.
+
+Resolution:
+- Rename → Ready
+- Unify:
+  - Source quarantined
+  - Row → Processed
+
+============================================================
+7. QUARANTINE
+============================================================
+
+- Located at Source/_quarantine
+- Excluded from watching
+- Losers renamed to non-stem names:
+  QUAR_<orig>__<fp>__<ts>.pdf
+
+Reintroduction:
+- User may move file back manually.
+- Treated as brand-new file.
+
+============================================================
+8. DEPOSIT
+============================================================
+
+- Disabled during OCR
+- Moves ALL Ready rows
+- Review rows ignored
+- Failures send row to Review
+
+============================================================
+9. EXPORT
+============================================================
+
+Eligibility:
+- Tax Invoice
+- Proforma
+
+Output:
+- Excel only
+- One file per click
+- Filename:
+  "QLD Eftpos <mode_date>.xls"
+
+Columns:
+1. Date
+2. Account
+3. Invoice Number
+4. Amount
+
+============================================================
+10. STATE & PERSISTENCE
+============================================================
+
+Persisted:
+- Folder selections
+- Processed ledger (500 rows)
+- Used-names registry
+- OCR caches
+
+Soft Reset:
+- Clears all above except folders + calibration
+
+============================================================
+11. PERFORMANCE GUARANTEES
+============================================================
+
+- OCR off main thread
+- UI updates throttled
+- Worker pool capped
+- No full-page OCR unless forced
+- No re-OCR without explicit user action
+
+============================================================
+12. DEVELOPMENT ORDER (FOUNDATION → POLISH)
+============================================================
+
+1. UI shell
+2. Row model
+3. Watcher + batching
+4. Phase-1 OCR
+5. Review + collisions
+6. Deposit
+7. Export
+8. Calibration + diagnostics
+
+============================================================
+END OF DESIGN DOCUMENT
+============================================================
