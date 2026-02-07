@@ -3,7 +3,8 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk, filedialog
 
-from state.persistence import load_settings, save_settings
+from core.demo_seed import make_initial_state
+from core.mutations import set_dest_path, set_source_path
 from ui.grid import FilesGrid
 from ui.status_bar import StatusBar
 
@@ -27,11 +28,11 @@ class AppWindow(ttk.Frame):
 		super().__init__(master, padding=10)
 
 		self.master = master
-		self._settings = load_settings()
+		self.state = make_initial_state()
 
-		self.source_var = tk.StringVar(value=self._settings.get("source_folder", ""))
-		self.dest_var = tk.StringVar(value=self._settings.get("dest_folder", ""))
-		self.export_var = tk.StringVar(value=self._settings.get("export_folder", ""))
+		self.source_var = tk.StringVar(value=self.state.source_path)
+		self.dest_var = tk.StringVar(value=self.state.dest_path)
+		self.export_var = tk.StringVar(value="")
 
 		self.viewing_text_var = tk.StringVar(value="")
 		self.file_count_var = tk.StringVar(value="Files: 0")
@@ -157,7 +158,8 @@ class AppWindow(ttk.Frame):
 		table_frame.columnconfigure(0, weight=1)
 		table_frame.rowconfigure(0, weight=1)
 
-		self.files_grid = FilesGrid(table_frame)
+		# Grid renders only from AppState.
+		self.files_grid = FilesGrid(table_frame, self.state)
 		self.files_grid.grid(row=0, column=0, sticky="nsew")
 		self.files_grid.on_visible_count_changed = lambda *_: self._sync_file_count()
 
@@ -187,22 +189,30 @@ class AppWindow(ttk.Frame):
 		self.file_count_var.set(f"Files: {count}")
 
 	def _browse_source(self) -> None:
-		self._browse_into_var(self.source_var, "source_folder")
-
-	def _browse_dest(self) -> None:
-		self._browse_into_var(self.dest_var, "dest_folder")
-
-	def _browse_export(self) -> None:
-		self._browse_into_var(self.export_var, "export_folder")
-
-	def _browse_into_var(self, var: tk.StringVar, key: str) -> None:
-		initial = var.get() or None
-		selected = filedialog.askdirectory(initialdir=initial, mustexist=False)
+		selected = self._browse_directory(self.source_var.get() or None)
 		if not selected:
 			return
-
-		var.set(selected)
-		self._settings[key] = selected
-		save_settings(self._settings)
+		set_source_path(self.state, selected)
+		self.source_var.set(self.state.source_path)
 		self.status_bar.set_success("Saved")
+
+	def _browse_dest(self) -> None:
+		selected = self._browse_directory(self.dest_var.get() or None)
+		if not selected:
+			return
+		set_dest_path(self.state, selected)
+		self.dest_var.set(self.state.dest_path)
+		self.status_bar.set_success("Saved")
+
+	def _browse_export(self) -> None:
+		selected = self._browse_directory(self.export_var.get() or None)
+		if not selected:
+			return
+		self.export_var.set(selected)
+		self.status_bar.set_success("Saved")
+
+	@staticmethod
+	def _browse_directory(initial: str | None) -> str:
+		selected = filedialog.askdirectory(initialdir=initial, mustexist=False)
+		return selected or ""
 

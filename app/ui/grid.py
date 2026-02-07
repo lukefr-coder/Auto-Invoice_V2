@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date
 import tkinter as tk
 from tkinter import ttk
 
-
-DEMO_MODE = True
-
-
+from core.app_state import AppState
+from core.mutations import (
+	apply_filters,
+	set_status_filter,
+	set_type_filter,
+	toggle_all_eligible,
+	toggle_row_checked,
+)
+from core.row_model import FileType, RowModel, RowStatus
 REVIEW_BG = "#FFF59D"
 PROCESSED_FG = "#0000EE"
 
@@ -37,36 +40,32 @@ TYPE_SHORTHAND = {
 }
 
 
-@dataclass
-class GridRow:
-	row_id: str
-	file_stem: str
-	doc_type: str
-	date: str = ""
-	account: str = ""
-	total: str = ""
-	status: str = "Ready"
-	checked: bool = False
+_DOC_TYPE_TO_ENUM: dict[str, FileType] = {
+	"Tax Invoice": FileType.TaxInvoice,
+	"Order": FileType.Order,
+	"Proforma": FileType.Proforma,
+	"Transfer": FileType.Transfer,
+	"Credit": FileType.Credit,
+}
+
+
+_ENUM_TO_DOC_TYPE: dict[FileType, str] = {v: k for k, v in _DOC_TYPE_TO_ENUM.items()}
+
+
+_STATUS_CYCLE: list[RowStatus | str] = ["All", RowStatus.Ready, RowStatus.Review, RowStatus.Processed]
+
+
+_TYPE_CYCLE: list[FileType | str] = ["All"] + [_DOC_TYPE_TO_ENUM[t] for t in DOC_TYPES]
 
 
 class FilesGrid(ttk.Frame):
-	def __init__(self, master: tk.Misc):
+	def __init__(self, master: tk.Misc, state: AppState):
 		super().__init__(master)
-
-		self._all_rows: list[GridRow] = []
-		self._rows_by_id: dict[str, GridRow] = {}
+		self._state = state
 		self.on_visible_count_changed = None
 
-		# Filters (None = All)
-		self._status_filter: str | None = None
-		self._type_filter: str | None = None
-
 		self._build_ui()
-
-		if DEMO_MODE:
-			self._inject_demo_rows()
-
-		self.apply_filters()
+		self.refresh()
 
 	def _build_ui(self) -> None:
 		style = ttk.Style(self)
@@ -150,31 +149,21 @@ class FilesGrid(ttk.Frame):
 	def get_visible_count(self) -> int:
 		return len(self.tree.get_children(""))
 
-	def set_rows(self, rows: list[GridRow]) -> None:
-		self._all_rows = list(rows)
-		self._rows_by_id = {r.row_id: r for r in rows}
-		self.apply_filters()
-
-	def apply_filters(self) -> None:
+	def refresh(self) -> None:
 		for item in self.tree.get_children(""):
 			self.tree.delete(item)
 
-		for row in self._all_rows:
-			if self._status_filter is not None and row.status != self._status_filter:
-				continue
-			if self._type_filter is not None and row.doc_type != self._type_filter:
-				continue
-
+		for row in apply_filters(self._state):
 			tags: tuple[str, ...] = ()
-			if row.status == "Review":
+			if row.status == RowStatus.Review:
 				tags = ("review",)
-			elif row.status == "Processed":
+			elif row.status == RowStatus.Processed:
 				tags = ("processed",)
 
 			self.tree.insert(
 				"",
 				"end",
-				iid=row.row_id,
+				iid=row.id,
 				values=self._row_values(row),
 				tags=tags,
 			)
@@ -186,36 +175,27 @@ class FilesGrid(ttk.Frame):
 			except TypeError:
 				self.on_visible_count_changed()
 
-	def _row_values(self, row: GridRow) -> tuple[str, str, str, str, str, str, str]:
-		eligible = self._checkbox_enabled(row)
+	def _row_values(self, row: RowModel) -> tuple[str, str, str, str, str, str, str]:
+		eligible = row.checkbox_enabled
 		checkbox_text = "☑" if (eligible and row.checked) else ("☐" if eligible else "")
+		doc_type = _ENUM_TO_DOC_TYPE.get(row.file_type, row.file_type.value)
 		return (
 			checkbox_text,
-			row.file_stem,
-			row.doc_type,
-			row.date,
-			row.account,
-			row.total,
-			row.status,
+			row.file_name,
+			doc_type,
+			row.date_str,
+			row.account_str,
+			row.total_str,
+			row.status.value,
 		)
 
 	def _toggle_header_checkbox(self) -> None:
-		eligible_rows = [r for r in self._all_rows if self._checkbox_enabled(r)]
+		eligible_rows = [r for r in self._state.rows if r.checkbox_enabled]
 		if not eligible_rows:
 			return
 		new_value = not all(r.checked for r in eligible_rows)
-		for r in eligible_rows:
-			r.checked = new_value
-		self.apply_filters()
-
-	def _checkbox_enabled(self, row: GridRow) -> bool:
-		if row.status == "Review":
-			return False
-		if row.doc_type not in ("Tax Invoice", "Proforma"):
-			return False
-		if row.status not in ("Ready", "Processed"):
-			return False
-		return True
+		toggle_all_eligible(self._state, new_value)
+		self.refresh()
 
 	def _on_mouse_down(self, event: tk.Event) -> str | None:
 		region = self.tree.identify("region", event.x, event.y)
@@ -231,73 +211,45 @@ class FilesGrid(ttk.Frame):
 		if column != "#1":
 			return None
 
-		row = self._rows_by_id.get(row_id)
+		row = next((r for r in self._state.rows if r.id == row_id), None)
 		if row is None:
 			return None
-
-		if not self._checkbox_enabled(row):
+		if not row.checkbox_enabled:
 			return None
 
-		row.checked = not row.checked
-		self.tree.item(row.row_id, values=self._row_values(row))
+		new_value = not row.checked
+		toggle_row_checked(self._state, row_id, new_value)
+		self.tree.item(row_id, values=self._row_values(row))
 		return "break"
 
 	def _cycle_status_filter(self) -> None:
-		cycle = [None, "Ready", "Review", "Processed"]
-		idx = cycle.index(self._status_filter)
-		self._status_filter = cycle[(idx + 1) % len(cycle)]
-		self.apply_filters()
+		current = self._state.filters.status_filter
+		idx = _STATUS_CYCLE.index(current)
+		next_value = _STATUS_CYCLE[(idx + 1) % len(_STATUS_CYCLE)]
+		set_status_filter(self._state, next_value)  # type: ignore[arg-type]
+		self.refresh()
 
 	def _cycle_type_filter(self) -> None:
-		cycle = [None] + DOC_TYPES
-		idx = cycle.index(self._type_filter)
-		self._type_filter = cycle[(idx + 1) % len(cycle)]
-		self.apply_filters()
+		current = self._state.filters.type_filter
+		idx = _TYPE_CYCLE.index(current)
+		next_value = _TYPE_CYCLE[(idx + 1) % len(_TYPE_CYCLE)]
+		set_type_filter(self._state, next_value)  # type: ignore[arg-type]
+		self.refresh()
 
 	def _refresh_header_text(self) -> None:
-		status_text = "All" if self._status_filter is None else self._status_filter
+		status_text = "All" if self._state.filters.status_filter == "All" else self._state.filters.status_filter.value
 		self.tree.heading("status", text=f"Status ({status_text})", command=self._cycle_status_filter)
 
-		if self._type_filter is None:
+		if self._state.filters.type_filter == "All":
 			type_header = "All"
 		else:
-			type_header = TYPE_SHORTHAND.get(self._type_filter, self._type_filter)
+			type_str = _ENUM_TO_DOC_TYPE.get(self._state.filters.type_filter, self._state.filters.type_filter.value)
+			type_header = TYPE_SHORTHAND.get(type_str, type_str)
 		self.tree.heading("type", text=f"Type ({type_header})", command=self._cycle_type_filter)
 
-		eligible_rows = [r for r in self._all_rows if self._checkbox_enabled(r)]
+		eligible_rows = [r for r in self._state.rows if r.checkbox_enabled]
 		glyph = "☐"
 		if eligible_rows and all(r.checked for r in eligible_rows):
 			glyph = "☑"
 		self.tree.heading("checked", text=glyph, command=self._toggle_header_checkbox)
-
-	@staticmethod
-	def _fmt_demo_date(iso_yyyy_mm_dd: str) -> str:
-		try:
-			y, m, d = (int(p) for p in iso_yyyy_mm_dd.split("-"))
-			return date(y, m, d).strftime("%d/%m/%y")
-		except Exception:
-			return iso_yyyy_mm_dd
-
-	def _inject_demo_rows(self) -> None:
-		demo = [
-			GridRow(
-				"r1",
-				"INV-0001",
-				"Tax Invoice",
-				date=self._fmt_demo_date("2026-02-01"),
-				account="",
-				total="",
-				status="Ready",
-			),
-			GridRow("r2", "INV-0002", "Tax Invoice", date="", account="", total="", status="Processed", checked=True),
-			GridRow("r3", "ORDER-914", "Order", date="", account="", total="", status="Ready"),
-			GridRow("r4", "PF-774", "Proforma", date="", account="", total="", status="Ready"),
-			GridRow("r5", "TRANSFER-22", "Transfer", date="", account="", total="", status="Ready"),
-			GridRow("r6", "CREDIT-51", "Credit", date="", account="", total="", status="Ready"),
-			GridRow("r7", "INV-REVIEW-3", "Tax Invoice", date="", account="", total="", status="Review"),
-			GridRow("r8", "PF-REVIEW-9", "Proforma", date="", account="", total="", status="Review"),
-			GridRow("r9", "ORDER-REVIEW", "Order", date="", account="", total="", status="Review"),
-			GridRow("r10", "PF-ARCH-01", "Proforma", date="", account="", total="", status="Processed"),
-		]
-		self.set_rows(demo)
 
