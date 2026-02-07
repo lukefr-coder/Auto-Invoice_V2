@@ -45,7 +45,7 @@ def make_initial_state() -> AppState:
 			account_str="",
 			total_str="",
 			status=RowStatus.Processed,
-			checked=True,
+			checked=False,
 			checkbox_enabled=_checkbox_enabled(FileType.TaxInvoice, RowStatus.Processed),
 		),
 		RowModel(
