@@ -40,6 +40,67 @@ class AppWindow(ttk.Frame):
 
 		self._build_layout()
 		self._sync_file_count()
+		self._center_window_once()
+
+	def _center_window_once(self) -> None:
+		# Center only on initial creation; do not affect runtime resizing/maximize behavior.
+		try:
+			self.master.update_idletasks()
+
+			win_w = self.master.winfo_width()
+			win_h = self.master.winfo_height()
+
+			# Windows work-area centering (excludes taskbar) via SPI_GETWORKAREA.
+			work_x = 0
+			work_y = 0
+			work_w = 0
+			work_h = 0
+			try:
+				import ctypes
+
+				SPI_GETWORKAREA = 48
+
+				class RECT(ctypes.Structure):
+					_fields_ = [
+						("left", ctypes.c_long),
+						("top", ctypes.c_long),
+						("right", ctypes.c_long),
+						("bottom", ctypes.c_long),
+					]
+
+				rect = RECT()
+				ok = ctypes.windll.user32.SystemParametersInfoW(
+					SPI_GETWORKAREA,
+					0,
+					ctypes.byref(rect),
+					0,
+				)
+				if ok:
+					work_x = int(rect.left)
+					work_y = int(rect.top)
+					work_w = int(rect.right - rect.left)
+					work_h = int(rect.bottom - rect.top)
+			except Exception:
+				pass
+
+			if work_w <= 1 or work_h <= 1:
+				work_x = 0
+				work_y = 0
+				work_w = self.master.winfo_screenwidth()
+				work_h = self.master.winfo_screenheight()
+
+			if win_w <= 1 or win_h <= 1:
+				return
+
+			x = work_x + (work_w - win_w) // 2
+			y = work_y + (work_h - win_h) // 2
+			if x < 0:
+				x = 0
+			if y < 0:
+				y = 0
+			self.master.geometry(f"+{x}+{y}")
+		except Exception:
+			return
 
 	def _build_layout(self) -> None:
 		self.grid(row=0, column=0, sticky="nsew")
@@ -67,7 +128,7 @@ class AppWindow(ttk.Frame):
 		left_opts.grid(row=0, column=0, sticky="w")
 		ttk.Button(left_opts, text="...", width=3, state="disabled").grid(row=0, column=0, padx=(0, 8))
 		ttk.Button(left_opts, text="Export Data (.xlsx)", state="disabled").grid(row=0, column=1)
-		ttk.Button(options_frame, text="Calibration", state="disabled").grid(row=0, column=1, sticky="e")
+		ttk.Button(options_frame, text="⚙ Calibration", state="disabled").grid(row=0, column=1, sticky="e")
 
 		# Files
 		files_frame = ttk.LabelFrame(self, text="Files", padding=(10, 6))
@@ -81,7 +142,7 @@ class AppWindow(ttk.Frame):
 		header_strip.columnconfigure(1, weight=1)
 		header_strip.columnconfigure(2, weight=1)
 
-		ttk.Label(header_strip, text="Sel   File   Type   Date   Account   Total   Status").grid(
+		ttk.Label(header_strip, text="").grid(
 			row=0, column=0, sticky="w"
 		)
 		ttk.Label(header_strip, textvariable=self.viewing_text_var).grid(row=0, column=1)

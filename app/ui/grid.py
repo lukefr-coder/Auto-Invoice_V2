@@ -9,7 +9,7 @@ from tkinter import ttk
 DEMO_MODE = True
 
 
-REVIEW_BG = "#FFEB3B"
+REVIEW_BG = "#FFF59D"
 PROCESSED_FG = "#0000EE"
 
 
@@ -69,6 +69,10 @@ class FilesGrid(ttk.Frame):
 		self.apply_filters()
 
 	def _build_ui(self) -> None:
+		style = ttk.Style(self)
+		base_font = style.lookup("Treeview", "font") or style.lookup("TLabel", "font")
+		style.configure("FilesGrid.Treeview.Heading", font=base_font)
+
 		columns = (
 			"checked",
 			"file",
@@ -87,7 +91,13 @@ class FilesGrid(ttk.Frame):
 		table_container.rowconfigure(0, weight=1)
 		table_container.columnconfigure(0, weight=1)
 
-		self.tree = ttk.Treeview(table_container, columns=columns, show="headings", selectmode="browse")
+		self.tree = ttk.Treeview(
+			table_container,
+			columns=columns,
+			show="headings",
+			selectmode="browse",
+			style="FilesGrid.Treeview",
+		)
 		self.tree.grid(row=0, column=0, sticky="nsew")
 
 		vsb = ttk.Scrollbar(table_container, orient="vertical", command=self.tree.yview)
@@ -109,7 +119,7 @@ class FilesGrid(ttk.Frame):
 		self.tree.column("date", width=150, minwidth=150, stretch=False, anchor="center")
 		self.tree.column("account", width=150, minwidth=150, stretch=False, anchor="center")
 		self.tree.column("total", width=150, minwidth=150, stretch=False, anchor="center")
-		self.tree.column("status", width=150, minwidth=150, stretch=False, anchor="center")
+		self.tree.column("status", width=150, minwidth=150, stretch=True, anchor="center")
 
 		self.tree.tag_configure("review", background=REVIEW_BG, foreground="black")
 		self.tree.tag_configure("processed", foreground=PROCESSED_FG)
