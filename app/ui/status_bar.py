@@ -38,6 +38,13 @@ class StatusBar(ttk.Frame):
 		self._cancel_timers()
 		self._label.configure(text=message, foreground="black")
 
+	def set_info(self, message: str) -> None:
+		self._cancel_timers()
+		self._label.configure(text=message, foreground="black")
+
+	def has_transient_message(self) -> bool:
+		return (self._working_after_id is not None) or (self._auto_clear_after_id is not None)
+
 	def _tick_working(self) -> None:
 		dots = "." * (self._working_phase + 1)
 		self._label.configure(text=f"{self._working_message}{dots}")
