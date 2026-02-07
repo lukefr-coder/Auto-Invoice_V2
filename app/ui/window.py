@@ -8,6 +8,20 @@ from ui.grid import FilesGrid
 from ui.status_bar import StatusBar
 
 
+def _white_address_entry(master: tk.Misc, textvariable: tk.StringVar) -> tk.Entry:
+	entry = tk.Entry(
+		master,
+		textvariable=textvariable,
+		state="readonly",
+		relief="solid",
+		bd=1,
+		background="white",
+		readonlybackground="white",
+	)
+	entry.configure(highlightthickness=0)
+	return entry
+
+
 class AppWindow(ttk.Frame):
 	def __init__(self, master: tk.Tk):
 		super().__init__(master, padding=10)
@@ -19,7 +33,13 @@ class AppWindow(ttk.Frame):
 		self.dest_var = tk.StringVar(value=self._settings.get("dest_folder", ""))
 		self.export_var = tk.StringVar(value=self._settings.get("export_folder", ""))
 
+		self.viewing_text_var = tk.StringVar(value="")
+		self.file_count_var = tk.StringVar(value="Files: 0")
+		self._sync_viewing_text()
+		self.source_var.trace_add("write", lambda *_: self._sync_viewing_text())
+
 		self._build_layout()
+		self._sync_file_count()
 
 	def _build_layout(self) -> None:
 		self.grid(row=0, column=0, sticky="nsew")
@@ -29,62 +49,81 @@ class AppWindow(ttk.Frame):
 		self.columnconfigure(0, weight=1)
 		self.rowconfigure(2, weight=1)
 
-		# 1) Source section
-		source_frame = ttk.Frame(self)
-		source_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-		source_frame.columnconfigure(1, weight=1)
-
-		ttk.Label(source_frame, text="Source").grid(row=0, column=0, sticky="w", padx=(0, 8))
-		source_entry = ttk.Entry(source_frame, textvariable=self.source_var, state="readonly")
-		source_entry.grid(row=0, column=1, sticky="ew")
-		ttk.Button(source_frame, text="...", width=3, command=self._browse_source).grid(
-			row=0, column=2, padx=(8, 0)
+		# Input
+		input_frame = ttk.LabelFrame(self, text="Input", padding=(10, 6))
+		input_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+		input_frame.columnconfigure(0, weight=1)
+		_white_address_entry(input_frame, self.source_var).grid(row=0, column=0, sticky="ew")
+		ttk.Button(input_frame, text="Browse...", command=self._browse_source).grid(
+			row=0, column=1, sticky="e", padx=(8, 0)
 		)
 
-		# 2) Export section
-		export_frame = ttk.Frame(self)
-		export_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-		export_frame.columnconfigure(1, weight=1)
+		# Options
+		options_frame = ttk.LabelFrame(self, text="Options", padding=(10, 6))
+		options_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+		options_frame.columnconfigure(0, weight=1)
 
-		export_btn = ttk.Button(export_frame, text="Export (.xls)", state="disabled")
-		export_btn.grid(row=0, column=0, sticky="w", padx=(0, 10))
+		left_opts = ttk.Frame(options_frame)
+		left_opts.grid(row=0, column=0, sticky="w")
+		ttk.Button(left_opts, text="...", width=3, state="disabled").grid(row=0, column=0, padx=(0, 8))
+		ttk.Button(left_opts, text="Export Data (.xlsx)", state="disabled").grid(row=0, column=1)
+		ttk.Button(options_frame, text="Calibration", state="disabled").grid(row=0, column=1, sticky="e")
 
-		export_entry = ttk.Entry(export_frame, textvariable=self.export_var, state="readonly")
-		export_entry.grid(row=0, column=1, sticky="ew")
+		# Files
+		files_frame = ttk.LabelFrame(self, text="Files", padding=(10, 6))
+		files_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
+		files_frame.columnconfigure(0, weight=1)
+		files_frame.rowconfigure(1, weight=1)
 
-		ttk.Button(export_frame, text="...", width=3, command=self._browse_export).grid(
-			row=0, column=2, padx=(8, 0)
+		header_strip = ttk.Frame(files_frame)
+		header_strip.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+		header_strip.columnconfigure(0, weight=1)
+		header_strip.columnconfigure(1, weight=1)
+		header_strip.columnconfigure(2, weight=1)
+
+		ttk.Label(header_strip, text="Sel   File   Type   Date   Account   Total   Status").grid(
+			row=0, column=0, sticky="w"
 		)
+		ttk.Label(header_strip, textvariable=self.viewing_text_var).grid(row=0, column=1)
 
-		calib_btn = ttk.Button(export_frame, text="⚙", width=3, state="disabled")
-		calib_btn.grid(row=0, column=3, padx=(8, 0))
+		right_hdr = ttk.Frame(header_strip)
+		right_hdr.grid(row=0, column=2, sticky="e")
+		ttk.Label(right_hdr, textvariable=self.file_count_var).grid(row=0, column=0, padx=(0, 6))
+		ttk.Button(right_hdr, text="🗑", width=3, state="disabled").grid(row=0, column=1)
 
-		# 3) Grid
-		grid_frame = ttk.Frame(self)
-		grid_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
-		grid_frame.rowconfigure(0, weight=1)
-		grid_frame.columnconfigure(0, weight=1)
+		table_frame = ttk.Frame(files_frame)
+		table_frame.grid(row=1, column=0, sticky="nsew")
+		table_frame.columnconfigure(0, weight=1)
+		table_frame.rowconfigure(0, weight=1)
 
-		self.files_grid = FilesGrid(grid_frame)
+		self.files_grid = FilesGrid(table_frame)
 		self.files_grid.grid(row=0, column=0, sticky="nsew")
+		self.files_grid.on_visible_count_changed = lambda *_: self._sync_file_count()
 
-		# 4) Destination section
-		dest_frame = ttk.Frame(self)
-		dest_frame.grid(row=3, column=0, sticky="ew", pady=(0, 8))
-		dest_frame.columnconfigure(1, weight=1)
+		bottom_strip = ttk.Frame(files_frame)
+		bottom_strip.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+		ttk.Button(bottom_strip, text="Open folder", state="disabled").grid(row=0, column=0, padx=(0, 8))
+		ttk.Button(bottom_strip, text="Highlights off", state="disabled").grid(row=0, column=1, padx=(0, 8))
+		ttk.Button(bottom_strip, text="Clear highlights", state="disabled").grid(row=0, column=2, padx=(0, 8))
+		ttk.Button(bottom_strip, text="Copy Debug Data", state="disabled").grid(row=0, column=3)
 
-		ttk.Label(dest_frame, text="Destination").grid(row=0, column=0, sticky="w", padx=(0, 8))
-		dest_entry = ttk.Entry(dest_frame, textvariable=self.dest_var, state="readonly")
-		dest_entry.grid(row=0, column=1, sticky="ew")
-		ttk.Button(dest_frame, text="...", width=3, command=self._browse_dest).grid(
-			row=0, column=2, padx=(8, 0)
-		)
-		deposit_btn = ttk.Button(dest_frame, text="Deposit", state="disabled")
-		deposit_btn.grid(row=0, column=3, padx=(10, 0))
+		# Output
+		output_frame = ttk.LabelFrame(self, text="Output", padding=(10, 6))
+		output_frame.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+		output_frame.columnconfigure(1, weight=1)
+		ttk.Button(output_frame, text="Browse...", command=self._browse_dest).grid(row=0, column=0, padx=(0, 8))
+		_white_address_entry(output_frame, self.dest_var).grid(row=0, column=1, sticky="ew")
+		ttk.Button(output_frame, text="Deposit Files", state="disabled").grid(row=0, column=2, padx=(8, 0))
 
-		# 5) Status bar
 		self.status_bar = StatusBar(self)
 		self.status_bar.grid(row=4, column=0, sticky="ew")
+
+	def _sync_viewing_text(self) -> None:
+		self.viewing_text_var.set(f"Viewing: {self.source_var.get()}")
+
+	def _sync_file_count(self) -> None:
+		count = self.files_grid.get_visible_count()
+		self.file_count_var.set(f"Files: {count}")
 
 	def _browse_source(self) -> None:
 		self._browse_into_var(self.source_var, "source_folder")

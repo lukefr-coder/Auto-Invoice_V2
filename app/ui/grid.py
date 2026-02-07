@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 import tkinter as tk
 from tkinter import ttk
 
 
 DEMO_MODE = True
+
+
+REVIEW_BG = "#FFEB3B"
+PROCESSED_FG = "#0000EE"
 
 
 DOC_TYPES = [
@@ -50,6 +55,7 @@ class FilesGrid(ttk.Frame):
 
 		self._all_rows: list[GridRow] = []
 		self._rows_by_id: dict[str, GridRow] = {}
+		self.on_visible_count_changed = None
 
 		# Filters (None = All)
 		self._status_filter: str | None = None
@@ -73,14 +79,22 @@ class FilesGrid(ttk.Frame):
 			"status",
 		)
 
-		self.tree = ttk.Treeview(self, columns=columns, show="headings", selectmode="browse")
-		self.tree.pack(side="left", fill="both", expand=True)
+		self.rowconfigure(0, weight=1)
+		self.columnconfigure(0, weight=1)
 
-		vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
-		vsb.pack(side="right", fill="y")
+		table_container = ttk.Frame(self)
+		table_container.grid(row=0, column=0, sticky="nsew")
+		table_container.rowconfigure(0, weight=1)
+		table_container.columnconfigure(0, weight=1)
+
+		self.tree = ttk.Treeview(table_container, columns=columns, show="headings", selectmode="browse")
+		self.tree.grid(row=0, column=0, sticky="nsew")
+
+		vsb = ttk.Scrollbar(table_container, orient="vertical", command=self.tree.yview)
+		vsb.grid(row=0, column=1, sticky="ns")
 		self.tree.configure(yscrollcommand=vsb.set)
 
-		self.tree.heading("checked", text="✓")
+		self.tree.heading("checked", text="☐", command=self._toggle_header_checkbox)
 		self.tree.heading("file", text="File")
 		self.tree.heading("type", text="Type (All)", command=self._cycle_type_filter)
 		self.tree.heading("date", text="Date")
@@ -88,18 +102,43 @@ class FilesGrid(ttk.Frame):
 		self.tree.heading("total", text="Total")
 		self.tree.heading("status", text="Status (All)", command=self._cycle_status_filter)
 
-		self.tree.column("checked", width=45, minwidth=45, stretch=False, anchor="center")
-		self.tree.column("file", width=240, minwidth=120, stretch=True, anchor="w")
-		self.tree.column("type", width=130, minwidth=110, stretch=False, anchor="w")
-		self.tree.column("date", width=100, minwidth=70, stretch=False, anchor="w")
-		self.tree.column("account", width=160, minwidth=100, stretch=True, anchor="w")
-		self.tree.column("total", width=90, minwidth=70, stretch=False, anchor="e")
-		self.tree.column("status", width=110, minwidth=90, stretch=False, anchor="w")
+		# Fixed column widths, no stretching.
+		self.tree.column("checked", width=40, minwidth=40, stretch=False, anchor="center")
+		self.tree.column("file", width=260, minwidth=260, stretch=False, anchor="w")
+		self.tree.column("type", width=150, minwidth=150, stretch=False, anchor="center")
+		self.tree.column("date", width=150, minwidth=150, stretch=False, anchor="center")
+		self.tree.column("account", width=150, minwidth=150, stretch=False, anchor="center")
+		self.tree.column("total", width=150, minwidth=150, stretch=False, anchor="center")
+		self.tree.column("status", width=150, minwidth=150, stretch=False, anchor="center")
 
-		self.tree.tag_configure("review", background="yellow")
-		self.tree.tag_configure("processed", foreground="blue")
+		self.tree.tag_configure("review", background=REVIEW_BG, foreground="black")
+		self.tree.tag_configure("processed", foreground=PROCESSED_FG)
 
+		# Disable separator dragging and resize cursor.
+		self.tree.bind("<ButtonPress-1>", self._block_heading_separator_drag, add=True)
+		self.tree.bind("<Motion>", self._suppress_resize_cursor, add=True)
 		self.tree.bind("<Button-1>", self._on_mouse_down, add=True)
+
+	def _block_heading_separator_drag(self, event: tk.Event) -> str | None:
+		if self.tree.identify_region(event.x, event.y) == "separator":
+			return "break"
+		return None
+
+	def _suppress_resize_cursor(self, event: tk.Event) -> None:
+		# Prevent the left/right resize cursor on column separators.
+		if self.tree.identify_region(event.x, event.y) == "separator":
+			try:
+				self.tree.configure(cursor="arrow")
+			except Exception:
+				pass
+		else:
+			try:
+				self.tree.configure(cursor="")
+			except Exception:
+				pass
+
+	def get_visible_count(self) -> int:
+		return len(self.tree.get_children(""))
 
 	def set_rows(self, rows: list[GridRow]) -> None:
 		self._all_rows = list(rows)
@@ -131,6 +170,11 @@ class FilesGrid(ttk.Frame):
 			)
 
 		self._refresh_header_text()
+		if self.on_visible_count_changed is not None:
+			try:
+				self.on_visible_count_changed(self.get_visible_count())
+			except TypeError:
+				self.on_visible_count_changed()
 
 	def _row_values(self, row: GridRow) -> tuple[str, str, str, str, str, str, str]:
 		eligible = self._checkbox_enabled(row)
@@ -144,6 +188,15 @@ class FilesGrid(ttk.Frame):
 			row.total,
 			row.status,
 		)
+
+	def _toggle_header_checkbox(self) -> None:
+		eligible_rows = [r for r in self._all_rows if self._checkbox_enabled(r)]
+		if not eligible_rows:
+			return
+		new_value = not all(r.checked for r in eligible_rows)
+		for r in eligible_rows:
+			r.checked = new_value
+		self.apply_filters()
 
 	def _checkbox_enabled(self, row: GridRow) -> bool:
 		if row.status == "Review":
@@ -201,9 +254,31 @@ class FilesGrid(ttk.Frame):
 			type_header = TYPE_SHORTHAND.get(self._type_filter, self._type_filter)
 		self.tree.heading("type", text=f"Type ({type_header})", command=self._cycle_type_filter)
 
+		eligible_rows = [r for r in self._all_rows if self._checkbox_enabled(r)]
+		glyph = "☐"
+		if eligible_rows and all(r.checked for r in eligible_rows):
+			glyph = "☑"
+		self.tree.heading("checked", text=glyph, command=self._toggle_header_checkbox)
+
+	@staticmethod
+	def _fmt_demo_date(iso_yyyy_mm_dd: str) -> str:
+		try:
+			y, m, d = (int(p) for p in iso_yyyy_mm_dd.split("-"))
+			return date(y, m, d).strftime("%d/%m/%y")
+		except Exception:
+			return iso_yyyy_mm_dd
+
 	def _inject_demo_rows(self) -> None:
 		demo = [
-			GridRow("r1", "INV-0001", "Tax Invoice", date="2026-02-01", account="", total="", status="Ready"),
+			GridRow(
+				"r1",
+				"INV-0001",
+				"Tax Invoice",
+				date=self._fmt_demo_date("2026-02-01"),
+				account="",
+				total="",
+				status="Ready",
+			),
 			GridRow("r2", "INV-0002", "Tax Invoice", date="", account="", total="", status="Processed", checked=True),
 			GridRow("r3", "ORDER-914", "Order", date="", account="", total="", status="Ready"),
 			GridRow("r4", "PF-774", "Proforma", date="", account="", total="", status="Ready"),
