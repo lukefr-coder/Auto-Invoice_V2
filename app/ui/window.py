@@ -5,6 +5,8 @@ from tkinter import ttk, filedialog
 
 from core.demo_seed import make_initial_state
 from core.mutations import set_dest_path, set_source_path
+from state import persistence
+from state.persistence import load_settings, save_settings
 from ui.grid import FilesGrid
 from ui.status_bar import StatusBar
 
@@ -29,10 +31,12 @@ class AppWindow(ttk.Frame):
 
 		self.master = master
 		self.state = make_initial_state()
+		self._settings = load_settings()
+		self._apply_persisted_settings()
 
 		self.source_var = tk.StringVar(value=self.state.source_path)
 		self.dest_var = tk.StringVar(value=self.state.dest_path)
-		self.export_var = tk.StringVar(value="")
+		self.export_var = tk.StringVar(value=self._settings.get(self._export_key(), ""))
 
 		self.viewing_text_var = tk.StringVar(value="")
 		self.file_count_var = tk.StringVar(value="Files: 0")
@@ -42,6 +46,29 @@ class AppWindow(ttk.Frame):
 		self._build_layout()
 		self._sync_file_count()
 		self._center_window_once()
+
+	def _source_key(self) -> str:
+		return persistence._KEYS[0]
+
+	def _dest_key(self) -> str:
+		return persistence._KEYS[1]
+
+	def _export_key(self) -> str:
+		return persistence._KEYS[2]
+
+	def _apply_persisted_settings(self) -> None:
+		source = self._settings.get(self._source_key(), "")
+		dest = self._settings.get(self._dest_key(), "")
+		if isinstance(source, str) and source:
+			set_source_path(self.state, source)
+		if isinstance(dest, str) and dest:
+			set_dest_path(self.state, dest)
+
+	def _persist_settings(self) -> None:
+		self._settings[self._source_key()] = self.state.source_path
+		self._settings[self._dest_key()] = self.state.dest_path
+		self._settings[self._export_key()] = self.export_var.get()
+		save_settings(self._settings)
 
 	def _center_window_once(self) -> None:
 		# Center only on initial creation; do not affect runtime resizing/maximize behavior.
@@ -194,6 +221,7 @@ class AppWindow(ttk.Frame):
 			return
 		set_source_path(self.state, selected)
 		self.source_var.set(self.state.source_path)
+		self._persist_settings()
 		self.status_bar.set_success("Saved")
 
 	def _browse_dest(self) -> None:
@@ -202,6 +230,7 @@ class AppWindow(ttk.Frame):
 			return
 		set_dest_path(self.state, selected)
 		self.dest_var.set(self.state.dest_path)
+		self._persist_settings()
 		self.status_bar.set_success("Saved")
 
 	def _browse_export(self) -> None:
@@ -209,6 +238,7 @@ class AppWindow(ttk.Frame):
 		if not selected:
 			return
 		self.export_var.set(selected)
+		self._persist_settings()
 		self.status_bar.set_success("Saved")
 
 	@staticmethod
