@@ -316,9 +316,31 @@ class Phase1Processor:
 
 				fp = _sha256_hex(orig_norm)
 				if fp in self._seen_fingerprints:
-					# IMPORTANT (Slice 05): do not delete duplicates here.
-					# Renames can trigger a second fs event and re-queue the renamed file;
-					# deleting would remove the only copy.
+					# IMPORTANT: duplicates are moved (not deleted) so the worker never
+					# removes the last remaining copy of a document.
+					try:
+						# Move to: <SOURCE_ROOT>/Source_quarantine/duplicates/
+						source_root = os.path.dirname(os.path.dirname(orig_norm))
+						dup_dir = os.path.join(source_root, "Source_quarantine", "duplicates")
+						os.makedirs(dup_dir, exist_ok=True)
+
+						base_name = os.path.basename(orig_norm)
+						stem, ext = os.path.splitext(base_name)
+						target = os.path.join(dup_dir, base_name)
+						if os.path.exists(target):
+							i = 2
+							while True:
+								cand = os.path.join(dup_dir, f"{stem}__{i}{ext}")
+								if not os.path.exists(cand):
+									target = cand
+									break
+								i += 1
+
+						os.replace(orig_norm, target)
+					except Exception:
+						# Failure handling: leave file in place and still emit duplicate_skipped.
+						pass
+
 					self._store_result(
 						Phase1Result(
 							batch_id=batch_id,
