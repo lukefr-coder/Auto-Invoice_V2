@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
 import queue
 import os
 import time
 
-from core.demo_seed import make_initial_state
-from core.mutations import set_dest_path, set_source_path
+from core.app_state import AppState
+from core.filters import FilterModel
+from core.mutations import resolve_review_row_manual, set_dest_path, set_source_path
 from core.app_state import (
 	add_row_from_phase1_result,
 	mark_item_done,
@@ -16,7 +17,15 @@ from core.app_state import (
 	reset_watch_state,
 	start_next_batch_if_idle,
 )
-from services.watcher import FolderWatcher, Phase1Processor
+from core.row_model import FileType, RowStatus
+from services.watcher import (
+	FolderWatcher,
+	Phase1Processor,
+	_attempt_rename,
+	_choose_collision_free_path,
+	_norm,
+	_sanitize_windows_filename_stem,
+)
 from state import persistence
 from state.persistence import load_settings, save_settings
 from ui.grid import FilesGrid
@@ -42,7 +51,12 @@ class AppWindow(ttk.Frame):
 		super().__init__(master, padding=10)
 
 		self.master = master
-		self.state = make_initial_state()
+		self.state = AppState(
+			source_path="",
+			dest_path="",
+			filters=FilterModel(type_filter="All", status_filter="All"),
+			rows=[],
+		)
 		self._settings = load_settings()
 		self._apply_persisted_settings()
 
@@ -334,6 +348,7 @@ class AppWindow(ttk.Frame):
 		self.files_grid = FilesGrid(table_frame, self.state)
 		self.files_grid.grid(row=0, column=0, sticky="nsew")
 		self.files_grid.on_visible_count_changed = lambda *_: self._sync_file_count()
+		self.files_grid.on_manual_input_requested = self._manual_input_for_row
 
 		bottom_strip = ttk.Frame(files_frame)
 		bottom_strip.grid(row=2, column=0, sticky="ew", pady=(6, 0))
@@ -391,4 +406,120 @@ class AppWindow(ttk.Frame):
 	def _browse_directory(initial: str | None) -> str:
 		selected = filedialog.askdirectory(initialdir=initial, mustexist=False)
 		return selected or ""
+
+	def _manual_input_for_row(self, row_id: str) -> None:
+		row = next((r for r in self.state.rows if r.id == row_id), None)
+		if row is None:
+			return
+		if row.status != RowStatus.Review:
+			return
+
+		result = self._show_manual_input_dialog(initial_doc_no=row.file_name, initial_file_type=row.file_type)
+		if result is None:
+			return
+		doc_no, file_type = result
+		doc_no = _sanitize_windows_filename_stem(doc_no)
+		if not doc_no or doc_no == "!":
+			messagebox.showwarning("Manual Input", "Document number is invalid.")
+			return
+
+		src_path = row.source_path
+		if not src_path:
+			messagebox.showerror("Manual Input", "This row has no source path.")
+			return
+		dir_path = os.path.dirname(src_path)
+		if not dir_path or not os.path.isdir(dir_path):
+			messagebox.showerror("Manual Input", "Source folder is missing or invalid.")
+			return
+
+		target = _choose_collision_free_path(dir_path, doc_no, ext=".pdf")
+		renamed_norm = _attempt_rename(_norm(src_path), target)
+		if renamed_norm is None:
+			messagebox.showerror(
+				"Manual Input",
+				"Rename failed. The file may be open, missing, or blocked by permissions.",
+			)
+			return
+
+		ok = resolve_review_row_manual(
+			self.state,
+			row_id=row_id,
+			doc_no=doc_no,
+			file_type=file_type,
+			new_source_path=renamed_norm,
+		)
+		if ok:
+			self.files_grid.refresh()
+			self.status_bar.set_success("Saved")
+
+	def _show_manual_input_dialog(
+		self,
+		*,
+		initial_doc_no: str,
+		initial_file_type: FileType,
+	) -> tuple[str, FileType] | None:
+		win = tk.Toplevel(self)
+		win.title("Manual Input")
+		win.resizable(False, False)
+		try:
+			win.transient(self.master)
+		except Exception:
+			pass
+
+		container = ttk.Frame(win, padding=12)
+		container.grid(row=0, column=0, sticky="nsew")
+
+		ttk.Label(container, text="Document No").grid(row=0, column=0, sticky="w")
+		doc_var = tk.StringVar(value="" if initial_doc_no == "!" else (initial_doc_no or ""))
+		doc_entry = ttk.Entry(container, textvariable=doc_var, width=36)
+		doc_entry.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+
+		ttk.Label(container, text="File Type").grid(row=2, column=0, sticky="w")
+		type_values = [
+			FileType.TaxInvoice.value,
+			FileType.Order.value,
+			FileType.Proforma.value,
+			FileType.Transfer.value,
+			FileType.Credit.value,
+			FileType.Unknown.value,
+		]
+		type_var = tk.StringVar(value=(initial_file_type.value if initial_file_type else FileType.Unknown.value))
+		type_combo = ttk.Combobox(container, textvariable=type_var, values=type_values, state="readonly", width=34)
+		type_combo.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+
+		btns = ttk.Frame(container)
+		btns.grid(row=4, column=0, sticky="e")
+
+		result: tuple[str, FileType] | None = None
+
+		def on_ok() -> None:
+			nonlocal result
+			doc_no = (doc_var.get() or "").strip()
+			if not doc_no:
+				messagebox.showwarning("Manual Input", "Please enter a document number.")
+				return
+			ft_str = (type_var.get() or "").strip()
+			ft = next((t for t in FileType if t.value == ft_str), FileType.Unknown)
+			result = (doc_no, ft)
+			win.destroy()
+
+		def on_cancel() -> None:
+			win.destroy()
+
+		ttk.Button(btns, text="Cancel", command=on_cancel).grid(row=0, column=0, padx=(0, 8))
+		ttk.Button(btns, text="OK", command=on_ok).grid(row=0, column=1)
+
+		win.bind("<Escape>", lambda _e: on_cancel())
+		doc_entry.bind("<Return>", lambda _e: on_ok())
+		try:
+			doc_entry.focus_set()
+		except Exception:
+			pass
+
+		try:
+			win.grab_set()
+		except Exception:
+			pass
+		self.master.wait_window(win)
+		return result
 

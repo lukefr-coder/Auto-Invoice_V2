@@ -45,3 +45,32 @@ def apply_filters(state: AppState) -> list[RowModel]:
 			continue
 		out.append(row)
 	return out
+
+
+def resolve_review_row_manual(
+	state: AppState,
+	*,
+	row_id: str,
+	doc_no: str,
+	file_type: FileType,
+	new_source_path: str,
+) -> bool:
+	"""Apply manual inputs to an existing row.
+
+	Updates file_name/file_type/status/source_path only.
+	Must be called on the UI thread.
+	"""
+	for row in state.rows:
+		if row.id != row_id:
+			continue
+
+		file_name = (doc_no or "").strip() or "!"
+		ft = file_type if isinstance(file_type, FileType) else FileType.Unknown
+		status = RowStatus.Ready if (file_name != "!" and ft != FileType.Unknown) else RowStatus.Review
+
+		row.file_name = file_name
+		row.file_type = ft
+		row.status = status
+		row.source_path = new_source_path or row.source_path
+		return True
+	return False

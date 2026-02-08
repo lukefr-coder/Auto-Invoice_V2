@@ -63,6 +63,7 @@ class FilesGrid(ttk.Frame):
 		super().__init__(master)
 		self._state = state
 		self.on_visible_count_changed = None
+		self.on_manual_input_requested = None
 
 		self._build_ui()
 		self.refresh()
@@ -127,6 +128,20 @@ class FilesGrid(ttk.Frame):
 		self.tree.bind("<ButtonPress-1>", self._block_heading_separator_drag, add=True)
 		self.tree.bind("<Motion>", self._suppress_resize_cursor, add=True)
 		self.tree.bind("<Button-1>", self._on_mouse_down, add=True)
+		self.tree.bind("<Button-3>", self._on_right_click, add=True)
+
+	def _on_right_click(self, event: tk.Event) -> str | None:
+		row_id = self.tree.identify_row(event.y)
+		if not row_id:
+			return None
+
+		if self.on_manual_input_requested is None:
+			return None
+		try:
+			self.on_manual_input_requested(row_id)
+		except TypeError:
+			self.on_manual_input_requested()
+		return "break"
 
 	def _block_heading_separator_drag(self, event: tk.Event) -> str | None:
 		if self.tree.identify_region(event.x, event.y) == "separator":
