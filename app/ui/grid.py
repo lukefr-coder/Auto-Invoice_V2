@@ -135,12 +135,39 @@ class FilesGrid(ttk.Frame):
 		if not row_id:
 			return None
 
+		# Select/focus row under cursor so menu actions apply to it.
+		try:
+			self.tree.selection_set(row_id)
+			self.tree.focus(row_id)
+		except Exception:
+			pass
+
 		if self.on_manual_input_requested is None:
 			return None
+
+		row = next((r for r in self._state.rows if r.id == row_id), None)
+		eligible = bool(row is not None and row.status == RowStatus.Review)
+
+		menu = tk.Menu(self.tree, tearoff=0)
 		try:
-			self.on_manual_input_requested(row_id)
-		except TypeError:
-			self.on_manual_input_requested()
+			def _do_manual_input() -> None:
+				try:
+					self.on_manual_input_requested(row_id)
+				except TypeError:
+					self.on_manual_input_requested()
+
+			menu.add_command(
+				label="Manual Input...",
+				command=_do_manual_input,
+				state=("normal" if eligible else "disabled"),
+			)
+
+			menu.tk_popup(event.x_root, event.y_root)
+		finally:
+			try:
+				menu.grab_release()
+			except Exception:
+				pass
 		return "break"
 
 	def _block_heading_separator_drag(self, event: tk.Event) -> str | None:
