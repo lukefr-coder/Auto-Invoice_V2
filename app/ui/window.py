@@ -9,13 +9,14 @@ import time
 from core.demo_seed import make_initial_state
 from core.mutations import set_dest_path, set_source_path
 from core.app_state import (
+	add_row_from_phase1_stub,
 	mark_item_done,
 	mark_item_running,
 	on_fs_event,
 	reset_watch_state,
 	start_next_batch_if_idle,
 )
-from services.watcher import FakeWorkProcessor, FolderWatcher
+from services.watcher import FolderWatcher, Phase1StubProcessor
 from state import persistence
 from state.persistence import load_settings, save_settings
 from ui.grid import FilesGrid
@@ -58,11 +59,11 @@ class AppWindow(ttk.Frame):
 		self._sync_file_count()
 		self._center_window_once()
 
-		# Slice 03: background watching + fake work processing (no Tk calls off-thread).
+		# Slice 03/04A: background watching + Phase-1 stub processing (no Tk calls off-thread).
 		self._fs_event_queue: queue.Queue[str] = queue.Queue()
 		self._worker_event_queue: queue.Queue[tuple[str, int, str]] = queue.Queue()
 		self._watcher: FolderWatcher | None = None
-		self._worker = FakeWorkProcessor(self._worker_event_queue)
+		self._worker = Phase1StubProcessor(self._worker_event_queue)
 		self._worker.start()
 		self._batch_done_linger_until: float = 0.0
 		self._batch_done_linger_text: str = ""
@@ -164,6 +165,10 @@ class AppWindow(ttk.Frame):
 				mark_item_running(self.state, batch_id, path)
 			elif kind == "done":
 				mark_item_done(self.state, batch_id, path)
+				res = self._worker.take_result(batch_id, path)
+				if res is not None:
+					if add_row_from_phase1_stub(self.state, path=path):
+						self.files_grid.refresh()
 
 		# If the active batch just completed, linger the final status briefly.
 		if prev_batch is not None and self.state.active_batch is None and prev_batch.done_count >= prev_batch.total:

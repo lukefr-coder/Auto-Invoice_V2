@@ -5,7 +5,7 @@ import os
 from typing import Literal
 
 from core.filters import FilterModel
-from core.row_model import RowModel
+from core.row_model import FileType, RowModel, RowStatus
 
 
 WorkStatus = Literal["pending", "running", "done"]
@@ -40,6 +40,10 @@ class AppState:
 	active_batch: ActiveBatch | None = None
 	work_queue: list[WorkItem] = field(default_factory=list)
 	next_batch_id: int = 1
+
+	# Slice 04A: Phase-1 stub completion guards (in-memory only)
+	phase1_completed_paths: set[str] = field(default_factory=set)
+	next_row_seq: int = 1
 
 
 def normalize_path(path: str) -> str:
@@ -149,3 +153,35 @@ def mark_item_done(state: AppState, batch_id: int, path: str) -> None:
 	if state.active_batch.done_count >= state.active_batch.total:
 		state.active_batch = None
 		state.work_queue.clear()
+
+
+def add_row_from_phase1_stub(state: AppState, *, path: str) -> bool:
+	"""Append a Review row for a Phase-1 stub completion.
+
+	Returns True only when a new row is appended.
+	"""
+	norm = normalize_path(path)
+	if not norm:
+		return False
+	if norm in state.phase1_completed_paths:
+		return False
+	state.phase1_completed_paths.add(norm)
+
+	row_id = f"p1_{state.next_row_seq:04d}"
+	state.next_row_seq += 1
+
+	state.rows.append(
+		RowModel(
+			id=row_id,
+			file_name="!",
+			file_type=FileType.Unknown,
+			date_str="",
+			account_str="",
+			total_str="",
+			status=RowStatus.Review,
+			checked=False,
+			checkbox_enabled=False,
+			source_path=norm,
+		)
+	)
+	return True

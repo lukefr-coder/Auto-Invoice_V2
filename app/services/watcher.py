@@ -5,6 +5,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
+from dataclasses import dataclass as _dc
 
 
 def _norm(path: str) -> str:
@@ -140,11 +141,20 @@ class FolderWatcher:
 						prev.emitted = False
 
 
-class FakeWorkProcessor:
-	"""Sequential fake processor that emits running/done events.
+@_dc(frozen=True)
+class Phase1StubResult:
+	batch_id: int
+	original_path: str
+	kind: str = "stub_done"
 
-	Takes (batch_id, path) work items and emits tuples:
-		("running"|"done", batch_id, path)
+
+class Phase1StubProcessor:
+	"""Slice 04A Phase-1 stub worker.
+
+	- Background thread only; never calls Tk
+	- Emits ("running"|"done", batch_id, path)
+	- Stores a tiny result retrievable via take_result(...)
+	- Performs zero filesystem mutation (optional existence check only)
 	"""
 
 	def __init__(
@@ -152,12 +162,16 @@ class FakeWorkProcessor:
 		out_events: queue.Queue[tuple[str, int, str]],
 		*,
 		delay_s: float = 0.9,
+		check_exists: bool = True,
 	):
 		self._out_events = out_events
 		self._delay_s = delay_s
+		self._check_exists = check_exists
 		self._in: queue.Queue[tuple[int, str]] = queue.Queue()
 		self._stop = threading.Event()
-		self._thread = threading.Thread(target=self._run, name="FakeWorkProcessor", daemon=True)
+		self._thread = threading.Thread(target=self._run, name="Phase1StubProcessor", daemon=True)
+		self._results_lock = threading.Lock()
+		self._results_by_key: dict[tuple[int, str], Phase1StubResult] = {}
 
 	def start(self) -> None:
 		self._thread.start()
@@ -176,11 +190,20 @@ class FakeWorkProcessor:
 	def enqueue(self, batch_id: int, path: str) -> None:
 		self._in.put((batch_id, path))
 
+	def take_result(self, batch_id: int, path: str) -> Phase1StubResult | None:
+		key = (batch_id, _norm(path))
+		with self._results_lock:
+			return self._results_by_key.pop(key, None)
+
 	def _emit(self, kind: str, batch_id: int, path: str) -> None:
 		try:
 			self._out_events.put_nowait((kind, batch_id, path))
 		except queue.Full:
 			pass
+
+	def _store_result(self, res: Phase1StubResult) -> None:
+		with self._results_lock:
+			self._results_by_key[(res.batch_id, _norm(res.original_path))] = res
 
 	def _run(self) -> None:
 		while not self._stop.is_set():
@@ -188,5 +211,9 @@ class FakeWorkProcessor:
 			if batch_id < 0:
 				return
 			self._emit("running", batch_id, path)
-			time.sleep(self._delay_s)
+			norm = _norm(path)
+			if (not self._check_exists) or os.path.exists(norm):
+				self._store_result(Phase1StubResult(batch_id=batch_id, original_path=norm))
+			if self._delay_s > 0:
+				time.sleep(self._delay_s)
 			self._emit("done", batch_id, path)

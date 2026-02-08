@@ -16,6 +16,7 @@ class FileType(str, Enum):
 	Proforma = "Proforma"
 	Transfer = "Transfer"
 	Credit = "Credit"
+	Unknown = "Unknown"
 
 
 @dataclass
@@ -29,3 +30,4 @@ class RowModel:
 	status: RowStatus
 	checked: bool
 	checkbox_enabled: bool
+	source_path: str = ""
