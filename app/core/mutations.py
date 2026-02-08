@@ -71,6 +71,11 @@ def resolve_review_row_manual(
 		row.file_name = file_name
 		row.file_type = ft
 		row.status = status
+		if (row.status == RowStatus.Ready) and (row.file_type in {FileType.TaxInvoice, FileType.Proforma}):
+			row.checkbox_enabled = True
+		else:
+			row.checkbox_enabled = False
+			row.checked = False
 		row.source_path = new_source_path or row.source_path
 		return True
 	return False
