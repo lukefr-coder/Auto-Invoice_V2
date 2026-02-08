@@ -394,6 +394,7 @@ class AppWindow(ttk.Frame):
 		self.files_grid.grid(row=0, column=0, sticky="nsew")
 		self.files_grid.on_visible_count_changed = lambda *_: self._sync_file_count()
 		self.files_grid.on_manual_input_requested = self._manual_input_for_row
+		self.files_grid.on_collision_review_requested = self._show_collision_review_dialog
 
 		bottom_strip = ttk.Frame(files_frame)
 		bottom_strip.grid(row=2, column=0, sticky="ew", pady=(6, 0))
@@ -500,6 +501,45 @@ class AppWindow(ttk.Frame):
 		if ok:
 			self.files_grid.refresh()
 			self.status_bar.set_success("Saved")
+
+	def _show_collision_review_dialog(self, row_id: str) -> None:
+		win = tk.Toplevel(self)
+		win.title("Collision Review")
+		win.resizable(False, False)
+		try:
+			win.transient(self.master)
+		except Exception:
+			pass
+
+		main = ttk.Frame(win, padding=12)
+		main.grid(row=0, column=0, sticky="nsew")
+		win.columnconfigure(0, weight=1)
+		win.rowconfigure(0, weight=1)
+
+		ttk.Label(
+			main,
+			text=(
+				"Collision Review is an entry point only in this slice.\n"
+				"No collision pairing or preview is implemented yet."
+			),
+		).grid(row=0, column=0, sticky="w")
+
+		btns = ttk.Frame(main)
+		btns.grid(row=1, column=0, sticky="e", pady=(12, 0))
+		ttk.Button(btns, text="Close", command=win.destroy).grid(row=0, column=0)
+
+		win.bind("<Escape>", lambda _e: win.destroy())
+		try:
+			win.update_idletasks()
+		except Exception:
+			pass
+		self._center_toplevel(win)
+
+		try:
+			win.grab_set()
+		except Exception:
+			pass
+		self.master.wait_window(win)
 
 	def _show_manual_input_dialog(
 		self,

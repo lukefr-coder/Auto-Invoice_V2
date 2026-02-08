@@ -64,6 +64,7 @@ class FilesGrid(ttk.Frame):
 		self._state = state
 		self.on_visible_count_changed = None
 		self.on_manual_input_requested = None
+		self.on_collision_review_requested = None
 
 		self._build_ui()
 		self.refresh()
@@ -142,15 +143,33 @@ class FilesGrid(ttk.Frame):
 		except Exception:
 			pass
 
-		if self.on_manual_input_requested is None:
+		if self.on_manual_input_requested is None and self.on_collision_review_requested is None:
 			return None
 
 		row = next((r for r in self._state.rows if r.id == row_id), None)
-		eligible = bool(row is not None and row.status == RowStatus.Review)
+		manual_eligible = bool(
+			row is not None and row.status == RowStatus.Review and self.on_manual_input_requested is not None
+		)
+		collision_eligible = bool(
+			row is not None
+			and row.status == RowStatus.Review
+			and row.file_name != "!"
+			and self.on_collision_review_requested is not None
+		)
 
 		menu = tk.Menu(self.tree, tearoff=0)
 		try:
+			def _do_collision_review() -> None:
+				if self.on_collision_review_requested is None:
+					return
+				try:
+					self.on_collision_review_requested(row_id)
+				except TypeError:
+					self.on_collision_review_requested()
+
 			def _do_manual_input() -> None:
+				if self.on_manual_input_requested is None:
+					return
 				try:
 					self.on_manual_input_requested(row_id)
 				except TypeError:
@@ -159,7 +178,12 @@ class FilesGrid(ttk.Frame):
 			menu.add_command(
 				label="Manual Input...",
 				command=_do_manual_input,
-				state=("normal" if eligible else "disabled"),
+				state=("normal" if manual_eligible else "disabled"),
+			)
+			menu.add_command(
+				label="Collision Review...",
+				command=_do_collision_review,
+				state=("normal" if collision_eligible else "disabled"),
 			)
 
 			menu.tk_popup(event.x_root, event.y_root)
