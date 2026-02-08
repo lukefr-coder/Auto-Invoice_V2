@@ -178,6 +178,14 @@ def add_row_from_phase1_result(state: AppState, *, res: Phase1Result) -> bool:
 	orig_norm = normalize_path(res.original_path)
 	if not orig_norm:
 		return False
+
+	# Slice 05 idempotency: if the same fingerprint arrives again (even via a
+	# different path string due to rename-triggered fs events), treat it as
+	# already handled and avoid creating a second row.
+	if res.fingerprint_sha256 and res.fingerprint_sha256 in state.known_fingerprints:
+		state.phase1_completed_paths.add(orig_norm)
+		return False
+
 	if orig_norm in state.phase1_completed_paths:
 		return False
 	state.phase1_completed_paths.add(orig_norm)
