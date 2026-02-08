@@ -9,14 +9,14 @@ import time
 from core.demo_seed import make_initial_state
 from core.mutations import set_dest_path, set_source_path
 from core.app_state import (
-	add_row_from_phase1_stub,
+	add_row_from_phase1_result,
 	mark_item_done,
 	mark_item_running,
 	on_fs_event,
 	reset_watch_state,
 	start_next_batch_if_idle,
 )
-from services.watcher import FolderWatcher, Phase1StubProcessor
+from services.watcher import FolderWatcher, Phase1Processor
 from state import persistence
 from state.persistence import load_settings, save_settings
 from ui.grid import FilesGrid
@@ -63,7 +63,7 @@ class AppWindow(ttk.Frame):
 		self._fs_event_queue: queue.Queue[str] = queue.Queue()
 		self._worker_event_queue: queue.Queue[tuple[str, int, str]] = queue.Queue()
 		self._watcher: FolderWatcher | None = None
-		self._worker = Phase1StubProcessor(self._worker_event_queue)
+		self._worker = Phase1Processor(self._worker_event_queue)
 		self._worker.start()
 		self._batch_done_linger_until: float = 0.0
 		self._batch_done_linger_text: str = ""
@@ -167,7 +167,7 @@ class AppWindow(ttk.Frame):
 				mark_item_done(self.state, batch_id, path)
 				res = self._worker.take_result(batch_id, path)
 				if res is not None:
-					if add_row_from_phase1_stub(self.state, path=path):
+					if add_row_from_phase1_result(self.state, res=res):
 						self.files_grid.refresh()
 
 		# If the active batch just completed, linger the final status briefly.

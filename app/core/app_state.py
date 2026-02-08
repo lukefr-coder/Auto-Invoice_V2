@@ -9,6 +9,18 @@ from core.row_model import FileType, RowModel, RowStatus
 
 
 WorkStatus = Literal["pending", "running", "done"]
+Phase1Kind = Literal["processed", "duplicate_skipped"]
+
+
+@dataclass(frozen=True)
+class Phase1Result:
+	batch_id: int
+	original_path: str
+	fingerprint_sha256: str
+	doc_no: str
+	file_type: FileType
+	renamed_path: str
+	kind: Phase1Kind = "processed"
 
 
 @dataclass
@@ -44,6 +56,9 @@ class AppState:
 	# Slice 04A: Phase-1 stub completion guards (in-memory only)
 	phase1_completed_paths: set[str] = field(default_factory=set)
 	next_row_seq: int = 1
+
+	# Slice 05: in-memory fingerprint set (UI-thread only mutation)
+	known_fingerprints: set[str] = field(default_factory=set)
 
 
 def normalize_path(path: str) -> str:
@@ -155,33 +170,50 @@ def mark_item_done(state: AppState, batch_id: int, path: str) -> None:
 		state.work_queue.clear()
 
 
-def add_row_from_phase1_stub(state: AppState, *, path: str) -> bool:
-	"""Append a Review row for a Phase-1 stub completion.
+def add_row_from_phase1_result(state: AppState, *, res: Phase1Result) -> bool:
+	"""Create a row from a completed Phase-1 result.
 
-	Returns True only when a new row is appended.
+	Must be called on the UI thread.
 	"""
-	norm = normalize_path(path)
-	if not norm:
+	orig_norm = normalize_path(res.original_path)
+	if not orig_norm:
 		return False
-	if norm in state.phase1_completed_paths:
+	if orig_norm in state.phase1_completed_paths:
 		return False
-	state.phase1_completed_paths.add(norm)
+	state.phase1_completed_paths.add(orig_norm)
+
+	# Update known fingerprints ONLY here (UI thread).
+	if res.fingerprint_sha256:
+		state.known_fingerprints.add(res.fingerprint_sha256)
+
+	if res.kind == "duplicate_skipped":
+		return False
 
 	row_id = f"p1_{state.next_row_seq:04d}"
 	state.next_row_seq += 1
 
+	file_name = res.doc_no if res.doc_no and res.doc_no != "!" else "!"
+	file_type = res.file_type if isinstance(res.file_type, FileType) else FileType.Unknown
+	status = (
+		RowStatus.Ready
+		if (file_name != "!" and file_type != FileType.Unknown)
+		else RowStatus.Review
+	)
+
+	final_path = normalize_path(res.renamed_path) if res.renamed_path else orig_norm
+
 	state.rows.append(
 		RowModel(
 			id=row_id,
-			file_name="!",
-			file_type=FileType.Unknown,
+			file_name=file_name,
+			file_type=file_type,
 			date_str="",
 			account_str="",
 			total_str="",
-			status=RowStatus.Review,
+			status=status,
 			checked=False,
 			checkbox_enabled=False,
-			source_path=norm,
+			source_path=final_path,
 		)
 	)
 	return True

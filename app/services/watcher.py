@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import queue
+import re
 import threading
 import time
 from dataclasses import dataclass
 from dataclasses import dataclass as _dc
+
+from core.app_state import Phase1Result
+from core.row_model import FileType
 
 
 def _norm(path: str) -> str:
@@ -142,36 +147,129 @@ class FolderWatcher:
 
 
 @_dc(frozen=True)
-class Phase1StubResult:
-	batch_id: int
-	original_path: str
-	kind: str = "stub_done"
+class _Phase1Parsed:
+	doc_no: str
+	file_type: FileType
 
 
-class Phase1StubProcessor:
-	"""Slice 04A Phase-1 stub worker.
+_INVALID_WIN_CHARS_RE = re.compile(r'[<>:"/\\|?*]')
 
-	- Background thread only; never calls Tk
-	- Emits ("running"|"done", batch_id, path)
-	- Stores a tiny result retrievable via take_result(...)
-	- Performs zero filesystem mutation (optional existence check only)
+
+def _sanitize_windows_filename_stem(stem: str) -> str:
+	stem = (stem or "").strip()
+	stem = _INVALID_WIN_CHARS_RE.sub("_", stem)
+	stem = stem.rstrip(" .")
+	return stem
+
+
+def _sha256_hex(path: str) -> str:
+	h = hashlib.sha256()
+	with open(path, "rb") as f:
+		for chunk in iter(lambda: f.read(1024 * 1024), b""):
+			h.update(chunk)
+	return h.hexdigest()
+
+
+def _classify_file_type_from_text(text: str) -> FileType:
+	t = (text or "").upper()
+	if "TAX INVOICE" in t:
+		return FileType.TaxInvoice
+	if "PROFORMA" in t:
+		return FileType.Proforma
+	if "CREDIT" in t and "NOTE" in t:
+		return FileType.Credit
+	if "PURCHASE ORDER" in t:
+		return FileType.Order
+	if "TRANSFER" in t:
+		return FileType.Transfer
+	return FileType.Unknown
+
+
+_DOCNO_PATTERNS: list[re.Pattern[str]] = [
+	re.compile(
+		r"\b(?:INVOICE\s*(?:NO|NUMBER)|INV\s*(?:NO|#)|DOCUMENT\s*(?:NO|NUMBER)|DOC\s*(?:NO|#))\s*[:\-]?\s*([A-Z0-9][A-Z0-9\-_/]{2,})\b",
+		re.IGNORECASE,
+	),
+]
+
+
+def _extract_doc_no_from_text(text: str) -> str:
+	if not text:
+		return "!"
+	sample = text[:4000]
+	cands: set[str] = set()
+	for pat in _DOCNO_PATTERNS:
+		for m in pat.finditer(sample):
+			cand = (m.group(1) or "").strip().rstrip(".:")
+			if cand:
+				cands.add(cand)
+	if len(cands) != 1:
+		return "!"
+	return next(iter(cands))
+
+
+def _parse_phase1_from_pdf_page1(path: str) -> _Phase1Parsed:
+	try:
+		from pypdf import PdfReader  # type: ignore
+	except Exception:
+		return _Phase1Parsed(doc_no="!", file_type=FileType.Unknown)
+	try:
+		reader = PdfReader(path)
+		if not reader.pages:
+			return _Phase1Parsed(doc_no="!", file_type=FileType.Unknown)
+		text = reader.pages[0].extract_text() or ""
+		doc_no = _extract_doc_no_from_text(text)
+		file_type = _classify_file_type_from_text(text)
+		return _Phase1Parsed(doc_no=doc_no or "!", file_type=file_type)
+	except Exception:
+		return _Phase1Parsed(doc_no="!", file_type=FileType.Unknown)
+
+
+def _choose_collision_free_path(dir_path: str, base_stem: str, *, ext: str = ".pdf") -> str:
+	base = _sanitize_windows_filename_stem(base_stem)
+	if not base:
+		base = "!"
+	first = os.path.join(dir_path, base + ext)
+	if not os.path.exists(first):
+		return first
+	i = 2
+	while True:
+		cand = os.path.join(dir_path, f"{base}__{i}{ext}")
+		if not os.path.exists(cand):
+			return cand
+		i += 1
+
+
+def _attempt_rename(src_norm: str, target_path: str) -> str | None:
+	try:
+		if _norm(target_path) == src_norm:
+			return src_norm
+		os.replace(src_norm, target_path)
+		return _norm(target_path)
+	except Exception:
+		return None
+
+
+class Phase1Processor:
+	"""Slice 05 Phase-1 worker (no Tk, no Core/AppState access).
+
+	Event contract: emits ("running"|"done", batch_id, ORIGINAL_path)
 	"""
 
 	def __init__(
 		self,
 		out_events: queue.Queue[tuple[str, int, str]],
 		*,
-		delay_s: float = 0.9,
-		check_exists: bool = True,
+		delay_s: float = 0.0,
 	):
 		self._out_events = out_events
 		self._delay_s = delay_s
-		self._check_exists = check_exists
 		self._in: queue.Queue[tuple[int, str]] = queue.Queue()
 		self._stop = threading.Event()
-		self._thread = threading.Thread(target=self._run, name="Phase1StubProcessor", daemon=True)
+		self._thread = threading.Thread(target=self._run, name="Phase1Processor", daemon=True)
 		self._results_lock = threading.Lock()
-		self._results_by_key: dict[tuple[int, str], Phase1StubResult] = {}
+		self._results_by_key: dict[tuple[int, str], Phase1Result] = {}
+		self._seen_fingerprints: set[str] = set()
 
 	def start(self) -> None:
 		self._thread.start()
@@ -190,7 +288,7 @@ class Phase1StubProcessor:
 	def enqueue(self, batch_id: int, path: str) -> None:
 		self._in.put((batch_id, path))
 
-	def take_result(self, batch_id: int, path: str) -> Phase1StubResult | None:
+	def take_result(self, batch_id: int, path: str) -> Phase1Result | None:
 		key = (batch_id, _norm(path))
 		with self._results_lock:
 			return self._results_by_key.pop(key, None)
@@ -201,19 +299,98 @@ class Phase1StubProcessor:
 		except queue.Full:
 			pass
 
-	def _store_result(self, res: Phase1StubResult) -> None:
+	def _store_result(self, res: Phase1Result) -> None:
 		with self._results_lock:
 			self._results_by_key[(res.batch_id, _norm(res.original_path))] = res
 
 	def _run(self) -> None:
 		while not self._stop.is_set():
-			batch_id, path = self._in.get()
+			batch_id, original_path = self._in.get()
 			if batch_id < 0:
 				return
-			self._emit("running", batch_id, path)
-			norm = _norm(path)
-			if (not self._check_exists) or os.path.exists(norm):
-				self._store_result(Phase1StubResult(batch_id=batch_id, original_path=norm))
-			if self._delay_s > 0:
-				time.sleep(self._delay_s)
-			self._emit("done", batch_id, path)
+			self._emit("running", batch_id, original_path)
+			orig_norm = _norm(original_path)
+			try:
+				if not orig_norm or not os.path.exists(orig_norm):
+					continue
+
+				fp = _sha256_hex(orig_norm)
+				if fp in self._seen_fingerprints:
+					# IMPORTANT (Slice 05): do not delete duplicates here.
+					# Renames can trigger a second fs event and re-queue the renamed file;
+					# deleting would remove the only copy.
+					self._store_result(
+						Phase1Result(
+							batch_id=batch_id,
+							original_path=orig_norm,
+							fingerprint_sha256=fp,
+							doc_no="!",
+							file_type=FileType.Unknown,
+							renamed_path="",
+							kind="duplicate_skipped",
+						)
+					)
+					continue
+
+				self._seen_fingerprints.add(fp)
+
+				parsed = _parse_phase1_from_pdf_page1(orig_norm)
+				doc_no = parsed.doc_no if parsed.doc_no else "!"
+				file_type = parsed.file_type if isinstance(parsed.file_type, FileType) else FileType.Unknown
+
+				# Determine preferred target
+				if doc_no.lower().endswith(".pdf"):
+					doc_no = doc_no[:-4]
+				safe_doc_stem = _sanitize_windows_filename_stem(doc_no) if doc_no != "!" else ""
+				if doc_no != "!" and not safe_doc_stem:
+					doc_no = "!"
+					file_type = FileType.Unknown
+
+				dir_path = os.path.dirname(orig_norm)
+				fp12 = fp[:12]
+
+				preferred_path = (
+					_choose_collision_free_path(dir_path, safe_doc_stem)
+					if doc_no != "!"
+					else _choose_collision_free_path(dir_path, f"!__{fp12}")
+				)
+				fallback_path = _choose_collision_free_path(dir_path, f"!__{fp12}")
+
+				renamed_norm: str | None = None
+				if doc_no != "!":
+					renamed_norm = _attempt_rename(orig_norm, preferred_path)
+					if renamed_norm is None:
+						# CRITICAL: if doc_no-based rename fails, must attempt failure-name fallback.
+						renamed_norm = _attempt_rename(orig_norm, fallback_path)
+						doc_no = "!"
+						file_type = FileType.Unknown
+				else:
+					renamed_norm = _attempt_rename(orig_norm, fallback_path)
+
+				if renamed_norm is None:
+					# Only if both renames fail may we leave in place; force failure markers.
+					renamed_norm = orig_norm
+					doc_no = "!"
+					file_type = FileType.Unknown
+
+				self._store_result(
+					Phase1Result(
+						batch_id=batch_id,
+						original_path=orig_norm,
+						fingerprint_sha256=fp,
+						doc_no=doc_no,
+						file_type=file_type,
+						renamed_path=renamed_norm,
+						kind="processed",
+					)
+				)
+			except Exception:
+				# Keep worker alive.
+				pass
+			finally:
+				if self._delay_s > 0:
+					try:
+						time.sleep(self._delay_s)
+					except Exception:
+						pass
+				self._emit("done", batch_id, original_path)
