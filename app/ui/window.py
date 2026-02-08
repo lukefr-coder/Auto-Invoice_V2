@@ -29,6 +29,7 @@ from services.watcher import (
 from state import persistence
 from state.persistence import load_settings, save_settings
 from ui.grid import FilesGrid
+from ui.pdf_preview import PdfPage1Preview
 from ui.status_bar import StatusBar
 
 
@@ -289,6 +290,50 @@ class AppWindow(ttk.Frame):
 		except Exception:
 			return
 
+	def _center_toplevel(self, win: tk.Toplevel) -> None:
+		try:
+			win.update_idletasks()
+		except Exception:
+			return
+
+		# Prefer centering over the main window.
+		try:
+			parent = self.master
+			parent.update_idletasks()
+			pw = int(parent.winfo_width())
+			ph = int(parent.winfo_height())
+			px = int(parent.winfo_rootx())
+			py = int(parent.winfo_rooty())
+		except Exception:
+			pw = ph = px = py = 0
+
+		try:
+			ww = int(win.winfo_width())
+			wh = int(win.winfo_height())
+		except Exception:
+			ww = wh = 0
+
+		if pw > 1 and ph > 1 and ww > 1 and wh > 1:
+			x = px + (pw - ww) // 2
+			y = py + (ph - wh) // 2
+		else:
+			try:
+				sw = int(win.winfo_screenwidth())
+				sh = int(win.winfo_screenheight())
+			except Exception:
+				return
+			x = (sw - max(ww, 1)) // 2
+			y = (sh - max(wh, 1)) // 2
+
+		if x < 0:
+			x = 0
+		if y < 0:
+			y = 0
+		try:
+			win.geometry(f"+{x}+{y}")
+		except Exception:
+			return
+
 	def _build_layout(self) -> None:
 		self.grid(row=0, column=0, sticky="nsew")
 		self.master.rowconfigure(0, weight=1)
@@ -414,7 +459,11 @@ class AppWindow(ttk.Frame):
 		if row.status != RowStatus.Review:
 			return
 
-		result = self._show_manual_input_dialog(initial_doc_no=row.file_name, initial_file_type=row.file_type)
+		result = self._show_manual_input_dialog(
+			initial_doc_no=row.file_name,
+			initial_file_type=row.file_type,
+			pdf_path=row.source_path,
+		)
 		if result is None:
 			return
 		doc_no, file_type = result
@@ -457,24 +506,44 @@ class AppWindow(ttk.Frame):
 		*,
 		initial_doc_no: str,
 		initial_file_type: FileType,
+		pdf_path: str,
 	) -> tuple[str, FileType] | None:
 		win = tk.Toplevel(self)
 		win.title("Manual Input")
-		win.resizable(False, False)
+		win.resizable(True, True)
 		try:
 			win.transient(self.master)
 		except Exception:
 			pass
+		win.geometry("900x600")
+		win.minsize(700, 450)
 
-		container = ttk.Frame(win, padding=12)
-		container.grid(row=0, column=0, sticky="nsew")
+		main = ttk.Frame(win, padding=12)
+		main.grid(row=0, column=0, sticky="nsew")
+		win.columnconfigure(0, weight=1)
+		win.rowconfigure(0, weight=1)
+		main.columnconfigure(0, weight=0)
+		main.columnconfigure(1, weight=1)
+		main.rowconfigure(0, weight=1)
 
-		ttk.Label(container, text="Document No").grid(row=0, column=0, sticky="w")
+		left = ttk.Frame(main)
+		left.grid(row=0, column=0, sticky="ns", padx=(0, 12))
+
+		preview_container = ttk.Frame(main)
+		preview_container.grid(row=0, column=1, sticky="nsew")
+		preview_container.grid_propagate(False)
+		preview_container.columnconfigure(0, weight=1)
+		preview_container.rowconfigure(0, weight=1)
+		preview = PdfPage1Preview(preview_container)
+		preview.grid(row=0, column=0, sticky="nsew")
+		preview.set_pdf_path(pdf_path)
+
+		ttk.Label(left, text="Document No").grid(row=0, column=0, sticky="w")
 		doc_var = tk.StringVar(value="" if initial_doc_no == "!" else (initial_doc_no or ""))
-		doc_entry = ttk.Entry(container, textvariable=doc_var, width=36)
+		doc_entry = ttk.Entry(left, textvariable=doc_var, width=36)
 		doc_entry.grid(row=1, column=0, sticky="ew", pady=(0, 10))
 
-		ttk.Label(container, text="File Type").grid(row=2, column=0, sticky="w")
+		ttk.Label(left, text="File Type").grid(row=2, column=0, sticky="w")
 		type_values = [
 			FileType.TaxInvoice.value,
 			FileType.Order.value,
@@ -484,10 +553,10 @@ class AppWindow(ttk.Frame):
 			FileType.Unknown.value,
 		]
 		type_var = tk.StringVar(value=(initial_file_type.value if initial_file_type else FileType.Unknown.value))
-		type_combo = ttk.Combobox(container, textvariable=type_var, values=type_values, state="readonly", width=34)
+		type_combo = ttk.Combobox(left, textvariable=type_var, values=type_values, state="readonly", width=34)
 		type_combo.grid(row=3, column=0, sticky="ew", pady=(0, 10))
 
-		btns = ttk.Frame(container)
+		btns = ttk.Frame(left)
 		btns.grid(row=4, column=0, sticky="e")
 
 		result: tuple[str, FileType] | None = None
@@ -515,6 +584,12 @@ class AppWindow(ttk.Frame):
 			doc_entry.focus_set()
 		except Exception:
 			pass
+
+		try:
+			win.update_idletasks()
+		except Exception:
+			pass
+		self._center_toplevel(win)
 
 		try:
 			win.grab_set()
