@@ -599,6 +599,12 @@ class AppWindow(ttk.Frame):
 			if not sid:
 				return
 			self._manual_input_for_row(sid)
+			if not win.winfo_exists():
+				return
+			group = _recompute_group()
+			if len(group) < 2:
+				win.destroy()
+				return
 			_refresh_list()
 
 		manual_btn = ttk.Button(btns, text="Manual Input...", command=_do_manual_input, state="disabled")
