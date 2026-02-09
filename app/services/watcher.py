@@ -318,8 +318,26 @@ class Phase1Processor:
 				fp = _sha256_hex(orig_norm)
 				if fp in self._seen_fingerprints:
 					canonical = self._canonical_path_by_fp.get(fp)
-					if canonical is not None and orig_norm == canonical:
+					canonical_norm = _norm(canonical) if canonical else ""
+					if canonical_norm and orig_norm == canonical_norm:
 						# Canonical file re-seen; never quarantine it.
+						self._store_result(
+							Phase1Result(
+								batch_id=batch_id,
+								original_path=orig_norm,
+								fingerprint_sha256=fp,
+								doc_no="!",
+								file_type=FileType.Unknown,
+								renamed_path="",
+								kind="duplicate_skipped",
+							)
+						)
+						continue
+
+					if canonical_norm and not os.path.exists(canonical_norm):
+						# Canonical path is stale (file was renamed/moved outside worker);
+						# treat current path as canonical and never quarantine it.
+						self._canonical_path_by_fp[fp] = orig_norm
 						self._store_result(
 							Phase1Result(
 								batch_id=batch_id,
@@ -412,7 +430,7 @@ class Phase1Processor:
 					doc_no = "!"
 					file_type = FileType.Unknown
 
-				self._canonical_path_by_fp[fp] = renamed_norm
+				self._canonical_path_by_fp[fp] = _norm(renamed_norm or orig_norm)
 
 				self._store_result(
 					Phase1Result(
