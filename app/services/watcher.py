@@ -45,7 +45,7 @@ class FolderWatcher:
 	"""Polling folder watcher for stable PDFs.
 
 	- Detects *.pdf (case-insensitive)
-	- Excludes <source>/_quarantine
+	- Excludes <source>/quarantine
 	- Emits a path only once it is stable across 2 polls
 
 	Emits normalized absolute paths into out_queue.
@@ -87,7 +87,7 @@ class FolderWatcher:
 		source = _norm(self._source_path)
 		if not source or not os.path.isdir(source):
 			return
-		quarantine = _norm(os.path.join(source, "_quarantine"))
+		quarantine = _norm(os.path.join(source, "quarantine"))
 
 		while not self._stop.is_set():
 			try:
@@ -270,6 +270,7 @@ class Phase1Processor:
 		self._results_lock = threading.Lock()
 		self._results_by_key: dict[tuple[int, str], Phase1Result] = {}
 		self._seen_fingerprints: set[str] = set()
+		self._canonical_path_by_fp: dict[str, str] = {}
 
 	def start(self) -> None:
 		self._thread.start()
@@ -316,9 +317,47 @@ class Phase1Processor:
 
 				fp = _sha256_hex(orig_norm)
 				if fp in self._seen_fingerprints:
+					canonical = self._canonical_path_by_fp.get(fp)
+					if canonical is not None and orig_norm == canonical:
+						# Canonical file re-seen; never quarantine it.
+						self._store_result(
+							Phase1Result(
+								batch_id=batch_id,
+								original_path=orig_norm,
+								fingerprint_sha256=fp,
+								doc_no="!",
+								file_type=FileType.Unknown,
+								renamed_path="",
+								kind="duplicate_skipped",
+							)
+						)
+						continue
+
 					# IMPORTANT (Slice 05): do not delete duplicates here.
 					# Renames can trigger a second fs event and re-queue the renamed file;
 					# deleting would remove the only copy.
+					try:
+						source = os.path.dirname(orig_norm)
+						q_dir = os.path.join(source, "quarantine")
+						os.makedirs(q_dir, exist_ok=True)
+
+						base_name = os.path.basename(orig_norm)
+						stem, ext = os.path.splitext(base_name)
+						target = os.path.join(q_dir, base_name)
+						if os.path.exists(target):
+							i = 2
+							while True:
+								cand = os.path.join(q_dir, f"{stem}__{i}{ext}")
+								if not os.path.exists(cand):
+									target = cand
+									break
+								i += 1
+
+						os.replace(orig_norm, target)
+					except Exception:
+						# Failure handling: leave file in place and still emit duplicate_skipped.
+						pass
+
 					self._store_result(
 						Phase1Result(
 							batch_id=batch_id,
@@ -372,6 +411,8 @@ class Phase1Processor:
 					renamed_norm = orig_norm
 					doc_no = "!"
 					file_type = FileType.Unknown
+
+				self._canonical_path_by_fp[fp] = renamed_norm
 
 				self._store_result(
 					Phase1Result(
