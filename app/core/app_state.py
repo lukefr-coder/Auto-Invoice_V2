@@ -89,6 +89,29 @@ def _is_under_quarantine(state: AppState, norm_path: str) -> bool:
 	return norm_path.startswith(q + os.sep)
 
 
+def enforce_display_name_group_status(state: AppState, canon: str) -> None:
+	"""Force Review for all rows in an N-way collision group.
+
+	`canon` must already be casefolded.
+	"""
+	group = [
+		r
+		for r in state.rows
+		if (r.display_name or "").strip().casefold() == canon
+	]
+	if len(group) >= 2:
+		for r in group:
+			r.status = RowStatus.Review
+	elif len(group) == 1:
+		r = group[0]
+		base_status = (
+			RowStatus.Ready
+			if (r.display_name != "!" and r.file_type != FileType.Unknown)
+			else RowStatus.Review
+		)
+		r.status = base_status
+
+
 def reset_watch_state(state: AppState) -> None:
 	state.known_paths.clear()
 	state.pending_paths.clear()
@@ -200,13 +223,10 @@ def add_row_from_phase1_result(state: AppState, *, res: Phase1Result) -> bool:
 	row_id = f"p1_{state.next_row_seq:04d}"
 	state.next_row_seq += 1
 
+	display_name = res.doc_no.strip() if res.doc_no and res.doc_no != "!" else "!"
 	file_name = res.doc_no if res.doc_no and res.doc_no != "!" else "!"
 	file_type = res.file_type if isinstance(res.file_type, FileType) else FileType.Unknown
-	status = (
-		RowStatus.Ready
-		if (file_name != "!" and file_type != FileType.Unknown)
-		else RowStatus.Review
-	)
+	status = RowStatus.Ready if (display_name != "!" and file_type != FileType.Unknown) else RowStatus.Review
 
 	final_path = normalize_path(res.renamed_path) if res.renamed_path else orig_norm
 
@@ -222,6 +242,10 @@ def add_row_from_phase1_result(state: AppState, *, res: Phase1Result) -> bool:
 			checked=False,
 			checkbox_enabled=False,
 			source_path=final_path,
+			display_name=display_name,
 		)
 	)
+
+	if display_name != "!":
+		enforce_display_name_group_status(state, display_name.casefold())
 	return True

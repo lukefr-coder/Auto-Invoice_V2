@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from core.app_state import AppState
+from core.app_state import enforce_display_name_group_status
 from core.filters import All
 from core.row_model import FileType, RowModel, RowStatus
 
@@ -57,20 +58,29 @@ def resolve_review_row_manual(
 ) -> bool:
 	"""Apply manual inputs to an existing row.
 
-	Updates file_name/file_type/status/source_path only.
+	Updates display_name/file_name/file_type/status/source_path only.
 	Must be called on the UI thread.
 	"""
 	for row in state.rows:
 		if row.id != row_id:
 			continue
 
-		file_name = (doc_no or "").strip() or "!"
-		ft = file_type if isinstance(file_type, FileType) else FileType.Unknown
-		status = RowStatus.Ready if (file_name != "!" and ft != FileType.Unknown) else RowStatus.Review
+		old_canon = (row.display_name or "").strip().casefold()
 
+		display_name = (doc_no or "").strip() or "!"
+		file_name = display_name
+		ft = file_type if isinstance(file_type, FileType) else FileType.Unknown
+		status = RowStatus.Ready if (display_name != "!" and ft != FileType.Unknown) else RowStatus.Review
+
+		row.display_name = display_name
 		row.file_name = file_name
 		row.file_type = ft
 		row.status = status
+		new_canon = (row.display_name or "").strip().casefold()
+		if old_canon and old_canon != "!":
+			enforce_display_name_group_status(state, old_canon)
+		if new_canon and new_canon != "!":
+			enforce_display_name_group_status(state, new_canon)
 		if (row.status == RowStatus.Ready) and (row.file_type in {FileType.TaxInvoice, FileType.Proforma}):
 			row.checkbox_enabled = True
 		else:

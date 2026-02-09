@@ -153,7 +153,7 @@ class FilesGrid(ttk.Frame):
 		collision_eligible = bool(
 			row is not None
 			and row.status == RowStatus.Review
-			and row.file_name != "!"
+			and (row.display_name or "!") != "!"
 			and self.on_collision_review_requested is not None
 		)
 
@@ -245,9 +245,10 @@ class FilesGrid(ttk.Frame):
 		eligible = row.checkbox_enabled
 		checkbox_text = "☑" if (eligible and row.checked) else ("☐" if eligible else "")
 		doc_type = _ENUM_TO_DOC_TYPE.get(row.file_type, row.file_type.value)
+		display = row.display_name if (row.display_name and row.display_name != "!") else row.file_name
 		return (
 			checkbox_text,
-			row.file_name,
+			display,
 			doc_type,
 			row.date_str,
 			row.account_str,

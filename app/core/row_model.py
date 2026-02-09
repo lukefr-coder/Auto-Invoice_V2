@@ -31,3 +31,4 @@ class RowModel:
 	checked: bool
 	checkbox_enabled: bool
 	source_path: str = ""
+	display_name: str = "!"
