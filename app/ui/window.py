@@ -503,30 +503,109 @@ class AppWindow(ttk.Frame):
 			self.status_bar.set_success("Saved")
 
 	def _show_collision_review_dialog(self, row_id: str) -> None:
+		row = next((r for r in self.state.rows if r.id == row_id), None)
+		if row is None:
+			return
+		dn = (row.display_name or "").strip()
+		if not dn or dn == "!":
+			return
+		canon = dn.casefold()
+
 		win = tk.Toplevel(self)
 		win.title("Collision Review")
-		win.resizable(False, False)
+		win.resizable(True, True)
 		try:
 			win.transient(self.master)
 		except Exception:
 			pass
+		win.minsize(640, 320)
 
 		main = ttk.Frame(win, padding=12)
 		main.grid(row=0, column=0, sticky="nsew")
 		win.columnconfigure(0, weight=1)
 		win.rowconfigure(0, weight=1)
+		main.columnconfigure(0, weight=1)
+		main.rowconfigure(1, weight=1)
 
 		ttk.Label(
 			main,
-			text=(
-				"Collision Review is an entry point only in this slice.\n"
-				"No collision pairing or preview is implemented yet."
-			),
+			text="These rows share the same document name and require review.",
 		).grid(row=0, column=0, sticky="w")
 
+		list_frame = ttk.Frame(main)
+		list_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+		list_frame.columnconfigure(0, weight=1)
+		list_frame.rowconfigure(0, weight=1)
+
+		list_var = tk.StringVar(value=[])
+		listbox = tk.Listbox(list_frame, listvariable=list_var, height=10, exportselection=False)
+		listbox.grid(row=0, column=0, sticky="nsew")
+		vsb = ttk.Scrollbar(list_frame, orient="vertical", command=listbox.yview)
+		vsb.grid(row=0, column=1, sticky="ns")
+		listbox.configure(yscrollcommand=vsb.set)
+
+		selected_ids: list[str] = []
+
+		def _format_row(r) -> str:
+			base = os.path.basename(r.source_path or "")
+			ft = getattr(r.file_type, "value", str(r.file_type))
+			return f"{r.id}  |  {base}  |  {ft}"
+
+		def _recompute_group() -> list:
+			return [
+				r
+				for r in self.state.rows
+				if (r.display_name or "").strip().casefold() == canon
+			]
+
+		def _refresh_list() -> None:
+			group = _recompute_group()
+			selected_ids.clear()
+			items = [_format_row(r) for r in group]
+			list_var.set(items)
+			try:
+				listbox.selection_clear(0, "end")
+			except Exception:
+				pass
+			try:
+				manual_btn.configure(state="disabled")
+			except Exception:
+				pass
+
+		def _selected_row_id() -> str:
+			try:
+				sel = listbox.curselection()
+			except Exception:
+				sel = ()
+			if not sel:
+				return ""
+			idx = int(sel[0])
+			group = _recompute_group()
+			if idx < 0 or idx >= len(group):
+				return ""
+			return group[idx].id
+
+		def _on_select(_evt=None) -> None:
+			sid = _selected_row_id()
+			manual_btn.configure(state=("normal" if sid else "disabled"))
+
+		listbox.bind("<<ListboxSelect>>", _on_select, add=True)
+
 		btns = ttk.Frame(main)
-		btns.grid(row=1, column=0, sticky="e", pady=(12, 0))
-		ttk.Button(btns, text="Close", command=win.destroy).grid(row=0, column=0)
+		btns.grid(row=2, column=0, sticky="e", pady=(12, 0))
+
+		def _do_manual_input() -> None:
+			sid = _selected_row_id()
+			if not sid:
+				return
+			self._manual_input_for_row(sid)
+			_refresh_list()
+
+		manual_btn = ttk.Button(btns, text="Manual Input...", command=_do_manual_input, state="disabled")
+		manual_btn.grid(row=0, column=0, padx=(0, 8))
+		ttk.Button(btns, text="Close", command=win.destroy).grid(row=0, column=1)
+
+		_refresh_list()
 
 		win.bind("<Escape>", lambda _e: win.destroy())
 		try:
