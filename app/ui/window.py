@@ -511,6 +511,94 @@ class AppWindow(ttk.Frame):
 			return
 		canon = dn.casefold()
 
+		group2 = [
+			r
+			for r in self.state.rows
+			if (r.display_name or "").strip().casefold() == canon
+		]
+		if row.status == RowStatus.Review and len(group2) == 2:
+			row_a, row_b = sorted(group2, key=lambda r: r.id)
+
+			resolver = tk.Toplevel(self)
+			resolver.title("Collision Review")
+			resolver.resizable(True, True)
+			try:
+				resolver.transient(self.master)
+			except Exception:
+				pass
+			resolver.minsize(900, 520)
+
+			main2 = ttk.Frame(resolver, padding=12)
+			main2.grid(row=0, column=0, sticky="nsew")
+			resolver.columnconfigure(0, weight=1)
+			resolver.rowconfigure(0, weight=1)
+			main2.columnconfigure(0, weight=1)
+			main2.columnconfigure(1, weight=1)
+			main2.rowconfigure(0, weight=1)
+
+			pane_a = ttk.Labelframe(main2, text=f"Row A: {row_a.id}")
+			pane_a.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+			pane_a.columnconfigure(0, weight=1)
+			pane_a.rowconfigure(0, weight=1)
+
+			pane_b = ttk.Labelframe(main2, text=f"Row B: {row_b.id}")
+			pane_b.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+			pane_b.columnconfigure(0, weight=1)
+			pane_b.rowconfigure(0, weight=1)
+
+			content_a = ttk.Frame(pane_a, padding=10)
+			content_a.grid(row=0, column=0, sticky="nsew")
+			content_a.columnconfigure(0, weight=1)
+			content_a.rowconfigure(0, weight=1)
+			prev_a_container = ttk.Frame(content_a)
+			prev_a_container.grid(row=0, column=0, sticky="nsew")
+			prev_a_container.columnconfigure(0, weight=1)
+			prev_a_container.rowconfigure(0, weight=1)
+			prev_a = PdfPage1Preview(prev_a_container)
+			prev_a.grid(row=0, column=0, sticky="nsew")
+			prev_a.set_pdf_path(row_a.source_path)
+			ttk.Label(content_a, text="Rename").grid(row=1, column=0, sticky="w", pady=(10, 0))
+			_rename_a = ttk.Entry(content_a, width=40)
+			_rename_a.grid(row=2, column=0, sticky="ew")
+			ft_a = getattr(row_a.file_type, "value", str(row_a.file_type))
+			ttk.Label(content_a, text=f"Type: {ft_a}").grid(row=3, column=0, sticky="w", pady=(10, 0))
+
+			content_b = ttk.Frame(pane_b, padding=10)
+			content_b.grid(row=0, column=0, sticky="nsew")
+			content_b.columnconfigure(0, weight=1)
+			content_b.rowconfigure(0, weight=1)
+			prev_b_container = ttk.Frame(content_b)
+			prev_b_container.grid(row=0, column=0, sticky="nsew")
+			prev_b_container.columnconfigure(0, weight=1)
+			prev_b_container.rowconfigure(0, weight=1)
+			prev_b = PdfPage1Preview(prev_b_container)
+			prev_b.grid(row=0, column=0, sticky="nsew")
+			prev_b.set_pdf_path(row_b.source_path)
+			ttk.Label(content_b, text="Rename").grid(row=1, column=0, sticky="w", pady=(10, 0))
+			_rename_b = ttk.Entry(content_b, width=40)
+			_rename_b.grid(row=2, column=0, sticky="ew")
+			ft_b = getattr(row_b.file_type, "value", str(row_b.file_type))
+			ttk.Label(content_b, text=f"Type: {ft_b}").grid(row=3, column=0, sticky="w", pady=(10, 0))
+
+			btns2 = ttk.Frame(resolver, padding=(12, 0, 12, 12))
+			btns2.grid(row=1, column=0, sticky="e")
+			ttk.Button(btns2, text="Save", state="disabled").grid(row=0, column=0, padx=(0, 8))
+			ttk.Button(btns2, text="Cancel", command=resolver.destroy).grid(row=0, column=1)
+
+			resolver.bind("<Escape>", lambda _e: resolver.destroy())
+			try:
+				resolver.update_idletasks()
+			except Exception:
+				pass
+			self._center_toplevel(resolver)
+
+			try:
+				resolver.grab_set()
+			except Exception:
+				pass
+			self.master.wait_window(resolver)
+			return
+
 		win = tk.Toplevel(self)
 		win.title("Collision Review")
 		win.resizable(True, True)
