@@ -470,8 +470,27 @@ class AppWindow(ttk.Frame):
 			pass
 
 	def _on_deposit_clicked(self) -> None:
+		dest = (self.state.dest_path or "").strip()
+		if dest and os.path.isdir(dest):
+			try:
+				existing = {name.casefold() for name in os.listdir(dest)}
+			except Exception:
+				existing = set()
+			collided_any = False
+			if existing:
+				for row in self.state.rows:
+					if row.status != RowStatus.Ready:
+						continue
+					stem = _sanitize_windows_filename_stem(row.display_name)
+					fname = f"{stem}.pdf"
+					if fname.casefold() in existing:
+						row.status = RowStatus.Review
+						collided_any = True
+		else:
+			collided_any = False
+
 		changed = deposit_ready_rows(self.state)
-		if changed:
+		if changed or collided_any:
 			self.files_grid.refresh()
 			self._sync_file_count()
 		self._sync_deposit_enabled()
