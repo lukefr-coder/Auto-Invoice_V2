@@ -89,3 +89,22 @@ def resolve_review_row_manual(
 		row.source_path = new_source_path or row.source_path
 		return True
 	return False
+
+
+def deposit_ready_rows(state: AppState) -> int:
+	"""Deposit v1: mark all Ready rows as Processed.
+
+	Pure state transition (no filesystem). Must be called on the UI thread.
+	"""
+	changed = 0
+	for row in state.rows:
+		if row.status != RowStatus.Ready:
+			continue
+		row.status = RowStatus.Processed
+		if (row.status == RowStatus.Ready) and (row.file_type in {FileType.TaxInvoice, FileType.Proforma}):
+			row.checkbox_enabled = True
+		else:
+			row.checkbox_enabled = False
+			row.checked = False
+		changed += 1
+	return changed

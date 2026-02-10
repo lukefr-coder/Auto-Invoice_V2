@@ -8,7 +8,7 @@ import time
 
 from core.app_state import AppState
 from core.filters import FilterModel
-from core.mutations import resolve_review_row_manual, set_dest_path, set_source_path
+from core.mutations import deposit_ready_rows, resolve_review_row_manual, set_dest_path, set_source_path
 from core.app_state import (
 	add_row_from_phase1_result,
 	enforce_display_name_group_status,
@@ -231,6 +231,7 @@ class AppWindow(ttk.Frame):
 
 		# Update status text.
 		self._render_background_status(did_discover=drained_any)
+		self._sync_deposit_enabled()
 		self.after(100, self._poll_background)
 
 	def _render_background_status(self, *, did_discover: bool) -> None:
@@ -440,7 +441,13 @@ class AppWindow(ttk.Frame):
 		output_frame.columnconfigure(1, weight=1)
 		ttk.Button(output_frame, text="Browse...", command=self._browse_dest).grid(row=0, column=0, padx=(0, 8))
 		_white_address_entry(output_frame, self.dest_var).grid(row=0, column=1, sticky="ew")
-		ttk.Button(output_frame, text="Deposit Files", state="disabled").grid(row=0, column=2, padx=(8, 0))
+		self.deposit_btn = ttk.Button(
+			output_frame,
+			text="Deposit Files",
+			state="disabled",
+			command=self._on_deposit_clicked,
+		)
+		self.deposit_btn.grid(row=0, column=2, padx=(8, 0))
 
 		self.status_bar = StatusBar(self)
 		self.status_bar.grid(row=4, column=0, sticky="ew")
@@ -452,6 +459,23 @@ class AppWindow(ttk.Frame):
 		count = self.files_grid.get_visible_count()
 		self.file_count_var.set(f"Files: {count}")
 
+	def _sync_deposit_enabled(self) -> None:
+		try:
+			has_ready = any(r.status == RowStatus.Ready for r in self.state.rows)
+		except Exception:
+			return
+		try:
+			self.deposit_btn.configure(state=("normal" if has_ready else "disabled"))
+		except Exception:
+			pass
+
+	def _on_deposit_clicked(self) -> None:
+		changed = deposit_ready_rows(self.state)
+		if changed:
+			self.files_grid.refresh()
+			self._sync_file_count()
+		self._sync_deposit_enabled()
+
 	def _browse_source(self) -> None:
 		selected = self._browse_directory(self.source_var.get() or None)
 		if not selected:
@@ -461,6 +485,7 @@ class AppWindow(ttk.Frame):
 		self._persist_settings()
 		self._restart_watcher_if_possible()
 		self.status_bar.set_success("Saved")
+		self._sync_deposit_enabled()
 
 	def _browse_dest(self) -> None:
 		selected = self._browse_directory(self.dest_var.get() or None)
