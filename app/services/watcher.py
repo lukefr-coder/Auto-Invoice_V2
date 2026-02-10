@@ -317,10 +317,40 @@ class Phase1Processor:
 
 				fp = _sha256_hex(orig_norm)
 				if fp in self._seen_fingerprints:
+					can_quarantine = True
+					# GUARD 1 — Hash reliability: if fp is missing/invalid, do not quarantine.
+					# (_sha256_hex normally returns 64 hex chars; invalid values are treated as unreliable.)
+					fp_l = (fp or "").lower()
+					if len(fp_l) != 64 or any(c not in "0123456789abcdef" for c in fp_l):
+						can_quarantine = False
+
 					canonical = self._canonical_path_by_fp.get(fp)
 					canonical_norm = _norm(canonical) if canonical else ""
 					if canonical_norm and orig_norm == canonical_norm:
 						# Canonical file re-seen; never quarantine it.
+						can_quarantine = False
+
+					if not canonical_norm:
+						# No canonical mapping for a seen fp (e.g. prior processing failed mid-way);
+						# treat current path as canonical and never quarantine it.
+						can_quarantine = False
+						self._canonical_path_by_fp[fp] = orig_norm
+
+					if canonical_norm and not os.path.exists(canonical_norm):
+						# Canonical path is stale (file was renamed/moved outside worker);
+						# treat current path as canonical and never quarantine it.
+						can_quarantine = False
+						self._canonical_path_by_fp[fp] = orig_norm
+
+					# GUARD 2 — Canonical fingerprint verification (MANDATORY)
+					# Quarantine is allowed ONLY if:
+					# 1) canonical exists, 2) canonical exists on disk, 3) SHA256(canonical)==fp,
+					# 4) SHA256(current)==fp, 5) current path != canonical.
+					try:
+						current_verify = _sha256_hex(orig_norm)
+					except Exception:
+						# Fingerprint computation failed/unreliable; do not quarantine.
+						can_quarantine = False
 						self._store_result(
 							Phase1Result(
 								batch_id=batch_id,
@@ -334,10 +364,41 @@ class Phase1Processor:
 						)
 						continue
 
-					if canonical_norm and not os.path.exists(canonical_norm):
-						# Canonical path is stale (file was renamed/moved outside worker);
-						# treat current path as canonical and never quarantine it.
+					if current_verify != fp:
+						# The fp used for duplicate classification is not reliable for this file;
+						# do not quarantine.
+						can_quarantine = False
+
+					if (not canonical_norm) or (not os.path.exists(canonical_norm)) or (orig_norm == canonical_norm):
+						# Canonical missing/stale or re-seen; never quarantine.
+						can_quarantine = False
 						self._canonical_path_by_fp[fp] = orig_norm
+
+					try:
+						canonical_verify = _sha256_hex(canonical_norm)
+					except Exception:
+						# Canonical fingerprint verification failed; treat mapping as stale.
+						can_quarantine = False
+						self._canonical_path_by_fp[fp] = orig_norm
+						self._store_result(
+							Phase1Result(
+								batch_id=batch_id,
+								original_path=orig_norm,
+								fingerprint_sha256=fp,
+								doc_no="!",
+								file_type=FileType.Unknown,
+								renamed_path="",
+								kind="duplicate_skipped",
+							)
+						)
+						continue
+
+					if canonical_verify != fp:
+						# Canonical content does not match fp; treat mapping as stale.
+						can_quarantine = False
+						self._canonical_path_by_fp[fp] = orig_norm
+
+					if not can_quarantine:
 						self._store_result(
 							Phase1Result(
 								batch_id=batch_id,
