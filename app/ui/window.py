@@ -582,10 +582,141 @@ class AppWindow(ttk.Frame):
 			ft_b = getattr(row_b.file_type, "value", str(row_b.file_type))
 			ttk.Label(content_b, text=f"Type: {ft_b}").grid(row=3, column=0, sticky="w", pady=(10, 0))
 
+			def _sanitized_stem(raw: str) -> str:
+				return _sanitize_windows_filename_stem((raw or "").strip())
+
+			def _sync_save_enabled(*_args) -> None:
+				a = _sanitized_stem(rename_a_var.get())
+				b = _sanitized_stem(rename_b_var.get())
+				ok = bool(a) and bool(b) and a != "!" and b != "!" and a.casefold() != b.casefold()
+				try:
+					save_btn.configure(state=("normal" if ok else "disabled"))
+				except Exception:
+					pass
+
+			def _on_save() -> None:
+				stem_a = _sanitized_stem(rename_a_var.get())
+				stem_b = _sanitized_stem(rename_b_var.get())
+				if (not stem_a) or (not stem_b) or stem_a == "!" or stem_b == "!" or stem_a.casefold() == stem_b.casefold():
+					messagebox.showwarning("Collision Review", "Rename values are invalid or not distinct.")
+					_sync_save_enabled()
+					return
+
+				src_a = row_a.source_path
+				src_b = row_b.source_path
+				if not src_a or not src_b:
+					messagebox.showerror("Collision Review", "One or more rows have no source path.")
+					return
+
+				dir_a = os.path.dirname(src_a)
+				dir_b = os.path.dirname(src_b)
+				if not dir_a or not dir_b or _norm(dir_a) != _norm(dir_b):
+					messagebox.showerror("Collision Review", "Both files must be in the same folder to resolve a 2-row collision.")
+					return
+				if not os.path.isdir(dir_a):
+					messagebox.showerror("Collision Review", "Source folder is missing or invalid.")
+					return
+
+				final_a = os.path.join(dir_a, f"{stem_a}.pdf")
+				final_b = os.path.join(dir_a, f"{stem_b}.pdf")
+
+				orig_norms = {_norm(src_a), _norm(src_b)}
+				final_a_norm = _norm(final_a)
+				final_b_norm = _norm(final_b)
+				if os.path.exists(final_a) and final_a_norm not in orig_norms:
+					messagebox.showerror("Collision Review", "Target name for Row A already exists.")
+					return
+				if os.path.exists(final_b) and final_b_norm not in orig_norms:
+					messagebox.showerror("Collision Review", "Target name for Row B already exists.")
+					return
+
+				# Allocate two deterministic temp paths.
+				temp_paths: list[str] = []
+				for counter in range(10):
+					cand = os.path.join(dir_a, f".__ai_tmp__collision__{row_id}__{counter}.pdf")
+					if os.path.exists(cand):
+						continue
+					cand_norm = _norm(cand)
+					if cand_norm in orig_norms or cand_norm in {final_a_norm, final_b_norm}:
+						continue
+					temp_paths.append(cand)
+					if len(temp_paths) >= 2:
+						break
+				if len(temp_paths) < 2:
+					messagebox.showerror("Collision Review", "Unable to allocate temporary filenames.")
+					return
+				temp_a, temp_b = temp_paths[0], temp_paths[1]
+
+				# Phase 1: move both out of the way.
+				temp_a_norm = _attempt_rename(_norm(src_a), temp_a)
+				if temp_a_norm is None:
+					messagebox.showerror(
+						"Collision Review",
+						"Rename failed. The file may be open, missing, or blocked by permissions.",
+					)
+					return
+				temp_b_norm = _attempt_rename(_norm(src_b), temp_b)
+				if temp_b_norm is None:
+					_attempt_rename(_norm(temp_a_norm), src_a)
+					messagebox.showerror(
+						"Collision Review",
+						"Rename failed. No changes were applied.",
+					)
+					return
+
+				# Phase 2: apply exact final targets.
+				new_a_norm = _attempt_rename(_norm(temp_a_norm), final_a)
+				if new_a_norm is None:
+					_attempt_rename(_norm(temp_a_norm), src_a)
+					_attempt_rename(_norm(temp_b_norm), src_b)
+					messagebox.showerror(
+						"Collision Review",
+						"Rename failed. No changes were applied.",
+					)
+					return
+				new_b_norm = _attempt_rename(_norm(temp_b_norm), final_b)
+				if new_b_norm is None:
+					# Best-effort rollback.
+					_attempt_rename(_norm(new_a_norm), temp_a)
+					_attempt_rename(_norm(temp_a), src_a)
+					_attempt_rename(_norm(temp_b_norm), src_b)
+					messagebox.showerror(
+						"Collision Review",
+						"Rename failed. No changes were applied.",
+					)
+					return
+
+				ok_a = resolve_review_row_manual(
+					self.state,
+					row_id=row_a.id,
+					doc_no=stem_a,
+					file_type=row_a.file_type,
+					new_source_path=new_a_norm,
+				)
+				ok_b = resolve_review_row_manual(
+					self.state,
+					row_id=row_b.id,
+					doc_no=stem_b,
+					file_type=row_b.file_type,
+					new_source_path=new_b_norm,
+				)
+				if not (ok_a and ok_b):
+					messagebox.showerror("Collision Review", "Save failed.")
+					return
+
+				self.files_grid.refresh()
+				self.status_bar.set_success("Saved")
+				resolver.destroy()
+
 			btns2 = ttk.Frame(resolver, padding=(12, 0, 12, 12))
 			btns2.grid(row=1, column=0, sticky="e")
-			ttk.Button(btns2, text="Save", state="disabled").grid(row=0, column=0, padx=(0, 8))
+			save_btn = ttk.Button(btns2, text="Save", state="disabled", command=_on_save)
+			save_btn.grid(row=0, column=0, padx=(0, 8))
 			ttk.Button(btns2, text="Cancel", command=resolver.destroy).grid(row=0, column=1)
+
+			rename_a_var.trace_add("write", _sync_save_enabled)
+			rename_b_var.trace_add("write", _sync_save_enabled)
+			_sync_save_enabled()
 
 			resolver.bind("<Escape>", lambda _e: resolver.destroy())
 			try:
