@@ -102,6 +102,11 @@ def enforce_display_name_group_status(state: AppState, canon: str) -> None:
 	if len(group) >= 2:
 		for r in group:
 			r.status = RowStatus.Review
+			if (r.status == RowStatus.Ready) and (r.file_type in {FileType.TaxInvoice, FileType.Proforma}):
+				r.checkbox_enabled = True
+			else:
+				r.checkbox_enabled = False
+				r.checked = False
 	elif len(group) == 1:
 		r = group[0]
 		base_status = (
@@ -110,6 +115,11 @@ def enforce_display_name_group_status(state: AppState, canon: str) -> None:
 			else RowStatus.Review
 		)
 		r.status = base_status
+		if (r.status == RowStatus.Ready) and (r.file_type in {FileType.TaxInvoice, FileType.Proforma}):
+			r.checkbox_enabled = True
+		else:
+			r.checkbox_enabled = False
+			r.checked = False
 
 
 def reset_watch_state(state: AppState) -> None:
