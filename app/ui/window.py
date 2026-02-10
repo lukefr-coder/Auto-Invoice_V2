@@ -11,6 +11,7 @@ from core.filters import FilterModel
 from core.mutations import resolve_review_row_manual, set_dest_path, set_source_path
 from core.app_state import (
 	add_row_from_phase1_result,
+	enforce_display_name_group_status,
 	mark_item_done,
 	mark_item_running,
 	on_fs_event,
@@ -184,6 +185,36 @@ class AppWindow(ttk.Frame):
 				if res is not None:
 					if add_row_from_phase1_result(self.state, res=res):
 						self.files_grid.refresh()
+
+		# Reconcile deleted/missing files (UI-thread only): remove non-Processed rows whose source no longer exists,
+		# and recompute collision groups for impacted display names.
+		removed_canons: set[str] = set()
+		removed_any = False
+		for r in list(self.state.rows):
+			if r.status == RowStatus.Processed:
+				continue
+			p = (r.source_path or "").strip()
+			if p and (not os.path.exists(p)):
+				removed_any = True
+				canon = (r.display_name or "").strip().casefold()
+				if canon and canon != "!":
+					removed_canons.add(canon)
+				pn = _norm(p)
+				try:
+					self.state.known_paths.discard(pn)
+					self.state.pending_paths.discard(pn)
+					self.state.phase1_completed_paths.discard(pn)
+				except Exception:
+					pass
+				try:
+					self.state.rows.remove(r)
+				except Exception:
+					pass
+		for canon in removed_canons:
+			enforce_display_name_group_status(self.state, canon)
+		if removed_any:
+			self.files_grid.refresh()
+			self._sync_file_count()
 
 		# If the active batch just completed, linger the final status briefly.
 		if prev_batch is not None and self.state.active_batch is None and prev_batch.done_count >= prev_batch.total:
