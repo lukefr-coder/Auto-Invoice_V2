@@ -535,6 +535,8 @@ class AppWindow(ttk.Frame):
 		if row.status != RowStatus.Review:
 			return
 
+		old_display_name = row.display_name
+
 		result = self._show_manual_input_dialog(
 			initial_doc_no=row.file_name,
 			initial_file_type=row.file_type,
@@ -546,6 +548,15 @@ class AppWindow(ttk.Frame):
 		doc_no = _sanitize_windows_filename_stem(doc_no)
 		if not doc_no or doc_no == "!":
 			messagebox.showwarning("Manual Input", "Document number is invalid.")
+			return
+
+		new_display_name = doc_no
+		if new_display_name == old_display_name:
+			old_status = row.status
+			row.file_type = file_type
+			row.status = old_status
+			self.files_grid.refresh()
+			self.status_bar.set_success("Saved")
 			return
 
 		src_path = row.source_path
