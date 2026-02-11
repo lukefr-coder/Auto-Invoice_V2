@@ -98,6 +98,7 @@ class FolderWatcher:
 			time.sleep(self._poll_interval_s)
 
 	def _scan_once(self, source: str, quarantine: str) -> None:
+		seen_now: set[str] = set()
 		# Walk the source tree, skipping quarantine.
 		for root, dirs, files in os.walk(source):
 			root_norm = _norm(root)
@@ -122,6 +123,7 @@ class FolderWatcher:
 					continue
 
 				norm = _norm(candidate)
+				seen_now.add(norm)
 				prev = self._seen.get(norm)
 				cur = (int(st.st_size), int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))))
 
@@ -144,6 +146,10 @@ class FolderWatcher:
 					except queue.Full:
 						# Drop if UI is overwhelmed; it will be rediscovered later.
 						prev.emitted = False
+
+		for key in list(self._seen.keys()):
+			if key not in seen_now:
+				del self._seen[key]
 
 
 @_dc(frozen=True)
