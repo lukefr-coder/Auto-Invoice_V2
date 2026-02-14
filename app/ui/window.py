@@ -5,6 +5,7 @@ from tkinter import ttk, filedialog, messagebox
 import queue
 import os
 import time
+import re
 
 from core.app_state import AppState
 from core.filters import FilterModel
@@ -709,7 +710,12 @@ class AppWindow(ttk.Frame):
 			def _sync_save_enabled(*_args) -> None:
 				a = _sanitized_stem(rename_a_var.get())
 				b = _sanitized_stem(rename_b_var.get())
-				ok = bool(a) and bool(b) and a != "!" and b != "!" and a.casefold() != b.casefold()
+				base_pat = r"^\d{6}([A-Z])?$"
+				base_a = a[:-3] if (len(a) >= 3 and a[-3] == "(" and a[-2] in "123456789" and a[-1] == ")") else a
+				base_b = b[:-3] if (len(b) >= 3 and b[-3] == "(" and b[-2] in "123456789" and b[-1] == ")") else b
+				base_a_ok = re.fullmatch(base_pat, base_a) is not None
+				base_b_ok = re.fullmatch(base_pat, base_b) is not None
+				ok = bool(a) and bool(b) and a != "!" and b != "!" and a.casefold() != b.casefold() and base_a_ok and base_b_ok
 				try:
 					save_btn.configure(state=("normal" if ok else "disabled"))
 				except Exception:
