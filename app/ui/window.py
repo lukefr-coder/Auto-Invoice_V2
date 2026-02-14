@@ -725,6 +725,8 @@ class AppWindow(ttk.Frame):
 			def _sync_save_enabled(*_args) -> None:
 				a = _sanitized_stem(rename_a_var.get())
 				b = _sanitized_stem(rename_b_var.get())
+				a = (a or "").upper()
+				b = (b or "").upper()
 				base_pat = r"^\d{6}([A-Z])?$"
 				base_a = a[:-3] if (len(a) >= 3 and a[-3] == "(" and a[-2] in "123456789" and a[-1] == ")") else a
 				base_b = b[:-3] if (len(b) >= 3 and b[-3] == "(" and b[-2] in "123456789" and b[-1] == ")") else b
