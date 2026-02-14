@@ -6,6 +6,8 @@ import queue
 import os
 import time
 import re
+import threading
+import errno
 
 from core.app_state import AppState
 from core.filters import FilterModel
@@ -517,26 +519,107 @@ class AppWindow(ttk.Frame):
 
 	def _on_deposit_clicked(self) -> None:
 		dest = (self.state.dest_path or "").strip()
-		if dest and os.path.isdir(dest):
-			try:
-				existing = {name.casefold() for name in os.listdir(dest)}
-			except Exception:
-				existing = set()
-			collided_any = False
-			if existing:
-				for row in self.state.rows:
-					if row.status != RowStatus.Ready:
-						continue
-					stem = _sanitize_windows_filename_stem(row.display_name)
-					fname = f"{stem}.pdf"
-					if fname.casefold() in existing:
-						row.status = RowStatus.Review
-						collided_any = True
-		else:
-			collided_any = False
+		if not dest or (not os.path.isdir(dest)):
+			messagebox.showwarning("Deposit", "Destination folder is missing or invalid.")
+			return
 
-		changed = deposit_ready_rows(self.state)
-		if changed or collided_any:
+		# A) Pre-scan destination for collisions (existing logic remains).
+		try:
+			existing = {name.casefold() for name in os.listdir(dest)}
+		except Exception:
+			existing = set()
+		collided_any = False
+		if existing:
+			for row in self.state.rows:
+				if row.status != RowStatus.Ready:
+					continue
+				stem = _sanitize_windows_filename_stem(row.display_name)
+				fname = f"{stem}.pdf"
+				if fname.casefold() in existing:
+					row.status = RowStatus.Review
+					collided_any = True
+
+		# B) Build rows_to_move candidates.
+		rows_to_move = [r for r in self.state.rows if r.status == RowStatus.Ready]
+		if not rows_to_move:
+			if collided_any:
+				self.files_grid.refresh()
+				self._sync_file_count()
+			self._sync_deposit_enabled()
+			return
+
+		rows_snapshot = list(rows_to_move)
+		dest_dir = dest
+
+		def _deposit_worker(rows_snapshot, dest_dir: str) -> None:
+			results: list[tuple[str, str, str | None]] = []
+			for row in rows_snapshot:
+				stem = _sanitize_windows_filename_stem(row.display_name)
+				if not stem or stem == "!":
+					results.append((row.id, "error", None))
+					continue
+
+				src_path = (row.source_path or "").strip()
+				if not src_path:
+					results.append((row.id, "error", None))
+					continue
+				if not os.path.exists(src_path):
+					results.append((row.id, "error", None))
+					continue
+
+				dest_path = os.path.join(dest_dir, f"{stem}.pdf")
+				# No overwrite allowed.
+				if os.path.exists(dest_path):
+					results.append((row.id, "collision", dest_path))
+					continue
+
+				try:
+					try:
+						os.replace(src_path, dest_path)
+					except OSError as e:
+						# Cross-device fallback.
+						if getattr(e, "errno", None) == errno.EXDEV:
+							import shutil
+
+							shutil.move(src_path, dest_path)
+						else:
+							raise
+					results.append((row.id, "moved", dest_path))
+				except Exception:
+					results.append((row.id, "error", None))
+
+			try:
+				self.after(0, lambda: self._apply_deposit_results(results))
+			except Exception:
+				pass
+
+		threading.Thread(
+			target=_deposit_worker,
+			args=(rows_snapshot, dest_dir),
+			name="DepositWorker",
+			daemon=True,
+		).start()
+
+	def _apply_deposit_results(self, results: list[tuple[str, str, str | None]]) -> None:
+		changed = False
+		for row_id, kind, new_path in results:
+			row = next((r for r in self.state.rows if r.id == row_id), None)
+			if row is None:
+				continue
+
+			if kind == "moved":
+				if new_path:
+					row.status = RowStatus.Processed
+					row.source_path = new_path
+					changed = True
+			elif kind == "collision":
+				row.status = RowStatus.Review
+				changed = True
+			elif kind == "error":
+				row.status = RowStatus.Review
+				changed = True
+
+		if changed:
 			self.files_grid.refresh()
 			self._sync_file_count()
 		self._sync_deposit_enabled()
@@ -651,6 +734,164 @@ class AppWindow(ttk.Frame):
 			for r in self.state.rows
 			if (r.display_name or "").strip().casefold() == canon
 		]
+
+		# Destination collision case: a single row is blocked by an existing PDF in the destination folder.
+		if row.status == RowStatus.Review and len(group2) == 1:
+			dest = (self.state.dest_path or "").strip()
+			stem0 = _sanitize_windows_filename_stem(row.display_name)
+			competitor = os.path.join(dest, f"{stem0}.pdf") if dest and stem0 and stem0 != "!" else ""
+			if dest and competitor and os.path.exists(competitor):
+				resolver = tk.Toplevel(self)
+				resolver.title("Collision Review")
+				resolver.resizable(True, True)
+				try:
+					resolver.transient(self.master)
+				except Exception:
+					pass
+				resolver.minsize(900, 520)
+
+				main2 = ttk.Frame(resolver, padding=12)
+				main2.grid(row=0, column=0, sticky="nsew")
+				resolver.columnconfigure(0, weight=1)
+				resolver.rowconfigure(0, weight=1)
+				main2.columnconfigure(0, weight=1)
+				main2.columnconfigure(1, weight=1)
+				main2.rowconfigure(0, weight=1)
+
+				pane_a = ttk.Labelframe(main2, text=f"Source: {row.id}")
+				pane_a.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+				pane_a.columnconfigure(0, weight=1)
+				pane_a.rowconfigure(0, weight=1)
+
+				pane_b = ttk.Labelframe(main2, text="Destination (existing)")
+				pane_b.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+				pane_b.columnconfigure(0, weight=1)
+				pane_b.rowconfigure(0, weight=1)
+
+				content_a = ttk.Frame(pane_a, padding=10)
+				content_a.grid(row=0, column=0, sticky="nsew")
+				content_a.columnconfigure(0, weight=1)
+				content_a.rowconfigure(0, weight=1)
+				prev_a_container = ttk.Frame(content_a)
+				prev_a_container.grid(row=0, column=0, sticky="nsew")
+				prev_a_container.columnconfigure(0, weight=1)
+				prev_a_container.rowconfigure(0, weight=1)
+				prev_a = PdfPage1Preview(prev_a_container)
+				prev_a.grid(row=0, column=0, sticky="nsew")
+				prev_a.set_pdf_path(row.source_path)
+				ttk.Label(content_a, text="Rename").grid(row=1, column=0, sticky="w", pady=(10, 0))
+				rename_var = tk.StringVar(value=dn)
+				rename_var.trace_add("write", lambda *_: _upper_var(rename_var))
+				_rename = ttk.Entry(content_a, width=40, textvariable=rename_var)
+				_rename.grid(row=2, column=0, sticky="ew")
+				ft_a = getattr(row.file_type, "value", str(row.file_type))
+				ttk.Label(content_a, text=f"Type: {ft_a}").grid(row=3, column=0, sticky="w", pady=(10, 0))
+
+				content_b = ttk.Frame(pane_b, padding=10)
+				content_b.grid(row=0, column=0, sticky="nsew")
+				content_b.columnconfigure(0, weight=1)
+				content_b.rowconfigure(0, weight=1)
+				prev_b_container = ttk.Frame(content_b)
+				prev_b_container.grid(row=0, column=0, sticky="nsew")
+				prev_b_container.columnconfigure(0, weight=1)
+				prev_b_container.rowconfigure(0, weight=1)
+				prev_b = PdfPage1Preview(prev_b_container)
+				prev_b.grid(row=0, column=0, sticky="nsew")
+				prev_b.set_pdf_path(competitor)
+
+				def _sanitized_stem(raw: str) -> str:
+					return _sanitize_windows_filename_stem((raw or "").strip())
+
+				def _sync_save_enabled(*_args) -> None:
+					stem = _sanitized_stem(rename_var.get())
+					stem = (stem or "").upper()
+					base_pat = r"^\d{6}([A-Z])?$"
+					base = stem[:-3] if (len(stem) >= 3 and stem[-3] == "(" and stem[-2] in "123456789" and stem[-1] == ")") else stem
+					base_ok = re.fullmatch(base_pat, base) is not None
+					blocked = bool(dest) and bool(stem) and os.path.exists(os.path.join(dest, f"{stem}.pdf"))
+					ok = bool(stem) and stem != "!" and base_ok and (not blocked)
+					try:
+						save_btn.configure(state=("normal" if ok else "disabled"))
+					except Exception:
+						pass
+
+				def _on_save() -> None:
+					stem = _sanitized_stem(rename_var.get())
+					if (not stem) or stem == "!":
+						messagebox.showwarning("Collision Review", "Rename value is invalid.")
+						_sync_save_enabled()
+						return
+					base_pat = r"^\d{6}([A-Z])?$"
+					base = stem[:-3] if (len(stem) >= 3 and stem[-3] == "(" and stem[-2] in "123456789" and stem[-1] == ")") else stem
+					if re.fullmatch(base_pat, base) is None:
+						messagebox.showwarning("Collision Review", "Rename value is invalid.")
+						_sync_save_enabled()
+						return
+					if dest and os.path.exists(os.path.join(dest, f"{stem}.pdf")):
+						messagebox.showerror("Collision Review", "Target name already exists in the destination folder.")
+						_sync_save_enabled()
+						return
+
+					src = (row.source_path or "").strip()
+					if not src:
+						messagebox.showerror("Collision Review", "This row has no source path.")
+						return
+					dir_src = os.path.dirname(src)
+					if not dir_src or not os.path.isdir(dir_src):
+						messagebox.showerror("Collision Review", "Source folder is missing or invalid.")
+						return
+
+					final_src = os.path.join(dir_src, f"{stem}.pdf")
+					if os.path.exists(final_src) and _norm(final_src) != _norm(src):
+						messagebox.showerror("Collision Review", "Target name already exists in the source folder.")
+						return
+
+					new_norm = _attempt_rename(_norm(src), final_src)
+					if new_norm is None:
+						messagebox.showerror(
+							"Collision Review",
+							"Rename failed. The file may be open, missing, or blocked by permissions.",
+						)
+						return
+
+					ok = resolve_review_row_manual(
+						self.state,
+						row_id=row.id,
+						doc_no=stem,
+						file_type=row.file_type,
+						new_source_path=new_norm,
+					)
+					if not ok:
+						messagebox.showerror("Collision Review", "Save failed.")
+						return
+
+					self.files_grid.refresh()
+					self.status_bar.set_success("Saved")
+					resolver.destroy()
+
+				btns2 = ttk.Frame(resolver, padding=(12, 0, 12, 12))
+				btns2.grid(row=1, column=0, sticky="e")
+				save_btn = ttk.Button(btns2, text="Save", state="disabled", command=_on_save)
+				save_btn.grid(row=0, column=0, padx=(0, 8))
+				ttk.Button(btns2, text="Cancel", command=resolver.destroy).grid(row=0, column=1)
+
+				rename_var.trace_add("write", _sync_save_enabled)
+				_sync_save_enabled()
+
+				resolver.bind("<Escape>", lambda _e: resolver.destroy())
+				try:
+					resolver.update_idletasks()
+				except Exception:
+					pass
+				self._center_toplevel(resolver)
+
+				try:
+					resolver.grab_set()
+				except Exception:
+					pass
+				self.master.wait_window(resolver)
+				return
+
 		if row.status == RowStatus.Review and len(group2) == 2:
 			row_a, row_b = sorted(group2, key=lambda r: r.id)
 
