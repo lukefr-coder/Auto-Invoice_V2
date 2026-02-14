@@ -49,6 +49,19 @@ def _white_address_entry(master: tk.Misc, textvariable: tk.StringVar) -> tk.Entr
 	return entry
 
 
+def _upper_var(var: tk.StringVar) -> None:
+	try:
+		value = var.get() or ""
+	except Exception:
+		return
+	upper = value.upper()
+	if upper != value:
+		try:
+			var.set(upper)
+		except Exception:
+			return
+
+
 class AppWindow(ttk.Frame):
 	def __init__(self, master: tk.Tk):
 		super().__init__(master, padding=10)
@@ -699,6 +712,8 @@ class AppWindow(ttk.Frame):
 			prev_b.set_pdf_path(row_b.source_path)
 			ttk.Label(content_b, text="Rename").grid(row=1, column=0, sticky="w", pady=(10, 0))
 			rename_b_var = tk.StringVar(value=f"{dn}(1)")
+			rename_a_var.trace_add("write", lambda *_: _upper_var(rename_a_var))
+			rename_b_var.trace_add("write", lambda *_: _upper_var(rename_b_var))
 			_rename_b = ttk.Entry(content_b, width=40, textvariable=rename_b_var)
 			_rename_b.grid(row=2, column=0, sticky="ew")
 			ft_b = getattr(row_b.file_type, "value", str(row_b.file_type))
@@ -1013,6 +1028,7 @@ class AppWindow(ttk.Frame):
 
 		ttk.Label(left, text="Document No").grid(row=0, column=0, sticky="w")
 		doc_var = tk.StringVar(value="" if initial_doc_no == "!" else (initial_doc_no or ""))
+		doc_var.trace_add("write", lambda *_: _upper_var(doc_var))
 		doc_entry = ttk.Entry(left, textvariable=doc_var, width=36)
 		doc_entry.grid(row=1, column=0, sticky="ew", pady=(0, 10))
 
