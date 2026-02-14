@@ -183,6 +183,27 @@ class AppWindow(ttk.Frame):
 				mark_item_done(self.state, batch_id, path)
 				res = self._worker.take_result(batch_id, path)
 				if res is not None:
+					if (
+						res.kind == "processed"
+						and res.renamed_path
+						and _norm(res.renamed_path) != _norm(res.original_path)
+					):
+						try:
+							orig_pn = _norm(res.original_path)
+							self.state.known_paths.discard(orig_pn)
+							self.state.pending_paths.discard(orig_pn)
+							self.state.phase1_completed_paths.discard(orig_pn)
+						except Exception:
+							pass
+					if res.kind == "duplicate_skipped":
+						pn = _norm(res.original_path)
+						try:
+							self.state.known_paths.discard(pn)
+							self.state.pending_paths.discard(pn)
+							self.state.phase1_completed_paths.discard(pn)
+						except Exception:
+							pass
+						continue
 					if add_row_from_phase1_result(self.state, res=res):
 						self.files_grid.refresh()
 
@@ -195,6 +216,17 @@ class AppWindow(ttk.Frame):
 				continue
 			p = (r.source_path or "").strip()
 			if p and (not os.path.exists(p)):
+				fp = (getattr(r, "fingerprint_sha256", "") or "").strip().lower()
+				if fp:
+					try:
+						self._worker.forget_fingerprint(fp)
+					except Exception:
+						pass
+					try:
+						if hasattr(self.state, "known_fingerprints"):
+							self.state.known_fingerprints.discard(fp)
+					except Exception:
+						pass
 				removed_any = True
 				canon = (r.display_name or "").strip().casefold()
 				if canon and canon != "!":
@@ -591,6 +623,9 @@ class AppWindow(ttk.Frame):
 	def _show_collision_review_dialog(self, row_id: str) -> None:
 		row = next((r for r in self.state.rows if r.id == row_id), None)
 		if row is None:
+			return
+		c = (row.display_name or "").strip().casefold()
+		if not c or c == "!":
 			return
 		dn = (row.display_name or "").strip()
 		if not dn or dn == "!":

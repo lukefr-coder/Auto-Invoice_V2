@@ -32,3 +32,4 @@ class RowModel:
 	checkbox_enabled: bool
 	source_path: str = ""
 	display_name: str = "!"
+	fingerprint_sha256: str = ""

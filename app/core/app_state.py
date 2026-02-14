@@ -94,6 +94,9 @@ def enforce_display_name_group_status(state: AppState, canon: str) -> None:
 
 	`canon` must already be casefolded.
 	"""
+	c = (canon or "").strip().casefold()
+	if not c or c == "!":
+		return
 	group = [
 		r
 		for r in state.rows
@@ -253,6 +256,7 @@ def add_row_from_phase1_result(state: AppState, *, res: Phase1Result) -> bool:
 			checkbox_enabled=False,
 			source_path=final_path,
 			display_name=display_name,
+			fingerprint_sha256=res.fingerprint_sha256 or "",
 		)
 	)
 

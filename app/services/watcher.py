@@ -295,6 +295,13 @@ class Phase1Processor:
 	def enqueue(self, batch_id: int, path: str) -> None:
 		self._in.put((batch_id, path))
 
+	def forget_fingerprint(self, fp: str) -> None:
+		fp = (fp or "").strip().lower()
+		if not fp:
+			return
+		self._seen_fingerprints.discard(fp)
+		self._canonical_path_by_fp.pop(fp, None)
+
 	def take_result(self, batch_id: int, path: str) -> Phase1Result | None:
 		key = (batch_id, _norm(path))
 		with self._results_lock:
@@ -321,6 +328,7 @@ class Phase1Processor:
 				if not orig_norm or not os.path.exists(orig_norm):
 					continue
 
+				fp = ""
 				fp = _sha256_hex(orig_norm)
 				if fp in self._seen_fingerprints:
 					can_quarantine = True
@@ -511,8 +519,24 @@ class Phase1Processor:
 					)
 				)
 			except Exception:
-				# Keep worker alive.
-				pass
+				# Keep worker alive, but never drop a file silently.
+				if fp:
+					try:
+						self._seen_fingerprints.discard(fp)
+						self._canonical_path_by_fp.pop(fp, None)
+					except Exception:
+						pass
+				self._store_result(
+					Phase1Result(
+						batch_id=batch_id,
+						original_path=orig_norm,
+						fingerprint_sha256=fp,
+						doc_no="!",
+						file_type=FileType.Unknown,
+						renamed_path="",
+						kind="processed",
+					)
+				)
 			finally:
 				if self._delay_s > 0:
 					try:
