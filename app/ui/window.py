@@ -817,6 +817,7 @@ class AppWindow(ttk.Frame):
 
 				def _on_save() -> None:
 					stem = _sanitized_stem(rename_var.get())
+					stem = (stem or "").upper()
 					if (not stem) or stem == "!":
 						messagebox.showwarning("Collision Review", "Rename value is invalid.")
 						_sync_save_enabled()
@@ -869,11 +870,99 @@ class AppWindow(ttk.Frame):
 					self.status_bar.set_success("Saved")
 					resolver.destroy()
 
+				def _on_unify() -> None:
+					ok = messagebox.askyesno(
+						"Unify",
+						"This will keep the destination file and move the source file into the quarantine folder.\n\nContinue?",
+					)
+					if not ok:
+						return
+
+					row_id2 = row.id
+					old_src = (row.source_path or "").strip()
+					source_root = (self.state.source_path or "").strip()
+
+					def _apply_unify_result(ok: bool, row_id2: str, old_src: str) -> None:
+						if not ok:
+							messagebox.showerror("Unify", "Unify failed.")
+							return
+
+						row_obj = next((r for r in self.state.rows if r.id == row_id2), None)
+						if row_obj is not None:
+							row_obj.status = RowStatus.Processed
+							row_obj.source_path = competitor
+							row_obj.checkbox_enabled = False
+							row_obj.checked = False
+
+						pn = _norm(old_src)
+						try:
+							self.state.known_paths.discard(pn)
+							self.state.pending_paths.discard(pn)
+							self.state.phase1_completed_paths.discard(pn)
+						except Exception:
+							pass
+
+						self.files_grid.refresh()
+						self._sync_file_count()
+						self._sync_deposit_enabled()
+						resolver.destroy()
+
+					def _unify_worker(old_src: str, source_root: str) -> None:
+						ok2 = False
+						try:
+							if not old_src or (not os.path.exists(old_src)):
+								raise FileNotFoundError()
+							if not source_root or (not os.path.isdir(source_root)):
+								raise FileNotFoundError()
+
+							q_dir = os.path.join(source_root, "quarantine")
+							os.makedirs(q_dir, exist_ok=True)
+
+							base_name = os.path.basename(old_src)
+							stem, ext = os.path.splitext(base_name)
+							if not ext:
+								ext = ".pdf"
+							target = os.path.join(q_dir, base_name)
+							if os.path.exists(target):
+								i = 2
+								while True:
+									cand = os.path.join(q_dir, f"{stem}__{i}{ext}")
+									if not os.path.exists(cand):
+										target = cand
+										break
+									i += 1
+
+							try:
+								os.replace(old_src, target)
+							except OSError as e:
+								if getattr(e, "errno", None) == errno.EXDEV:
+									import shutil
+
+									shutil.move(old_src, target)
+								else:
+									raise
+							ok2 = True
+						except Exception:
+							ok2 = False
+
+						try:
+							self.after(0, lambda: _apply_unify_result(ok2, row_id2, old_src))
+						except Exception:
+							pass
+
+					threading.Thread(
+						target=_unify_worker,
+						args=(old_src, source_root),
+						name="UnifyWorker",
+						daemon=True,
+					).start()
+
 				btns2 = ttk.Frame(resolver, padding=(12, 0, 12, 12))
 				btns2.grid(row=1, column=0, sticky="e")
+				ttk.Button(btns2, text="Unify (keep destination)", command=_on_unify).grid(row=0, column=0, padx=(0, 8))
 				save_btn = ttk.Button(btns2, text="Save", state="disabled", command=_on_save)
-				save_btn.grid(row=0, column=0, padx=(0, 8))
-				ttk.Button(btns2, text="Cancel", command=resolver.destroy).grid(row=0, column=1)
+				save_btn.grid(row=0, column=1, padx=(0, 8))
+				ttk.Button(btns2, text="Cancel", command=resolver.destroy).grid(row=0, column=2)
 
 				rename_var.trace_add("write", _sync_save_enabled)
 				_sync_save_enabled()
@@ -1093,11 +1182,169 @@ class AppWindow(ttk.Frame):
 				self.status_bar.set_success("Saved")
 				resolver.destroy()
 
+			def _on_unify() -> None:
+				loser = None
+				if row_a.id == row_id:
+					loser = row_b
+				elif row_b.id == row_id:
+					loser = row_a
+				else:
+					return
+				winner = row_a if loser is row_b else row_b
+
+				ok = messagebox.askyesno(
+					"Unify",
+					"This will keep the selected row and move the other file into the quarantine folder.\n\nContinue?",
+				)
+				if not ok:
+					return
+
+				loser_id = loser.id
+				loser_src = (loser.source_path or "").strip()
+				source_root = (self.state.source_path or "").strip()
+				winner_id = winner.id
+				winner_src = (winner.source_path or "").strip()
+				winner_display_name = winner.display_name
+
+				def _apply_unify_result(ok: bool, loser_id: str, loser_old_path: str, winner_id: str, winner_new_path: str) -> None:
+					if not ok:
+						messagebox.showerror("Unify", "Unify failed.")
+						return
+
+					loser_row = next((r for r in self.state.rows if r.id == loser_id), None)
+					if loser_row is not None:
+						try:
+							self.state.rows.remove(loser_row)
+						except Exception:
+							pass
+
+					pn = _norm(loser_old_path)
+					try:
+						self.state.known_paths.discard(pn)
+						self.state.pending_paths.discard(pn)
+						self.state.phase1_completed_paths.discard(pn)
+					except Exception:
+						pass
+
+					winner_row = next((r for r in self.state.rows if r.id == winner_id), None)
+					if winner_row is not None and winner_new_path:
+						winner_row.source_path = winner_new_path
+
+					enforce_display_name_group_status(self.state, canon)
+					self.files_grid.refresh()
+					self._sync_file_count()
+					self._sync_deposit_enabled()
+					resolver.destroy()
+
+				def _unify_worker(loser_id: str, loser_src: str, source_root: str, winner_id: str, winner_src: str, winner_display_name: str) -> None:
+					ok = False
+					winner_new_norm = ""
+					winner_orig_norm = ""
+					loser_temp_norm = ""
+					try:
+						if not loser_src or (not os.path.exists(loser_src)):
+							raise FileNotFoundError()
+						if not winner_src or (not os.path.exists(winner_src)):
+							raise FileNotFoundError()
+						if not source_root or (not os.path.isdir(source_root)):
+							raise FileNotFoundError()
+
+						winner_dir = os.path.dirname(winner_src)
+						if not winner_dir or (not os.path.isdir(winner_dir)):
+							raise FileNotFoundError()
+
+						canonical_stem = _sanitize_windows_filename_stem(winner_display_name).upper()
+						if not canonical_stem or canonical_stem == "!":
+							raise ValueError()
+						canonical_target = os.path.join(winner_dir, f"{canonical_stem}.pdf")
+						canonical_norm = _norm(canonical_target)
+
+						# Free canonical target name by staging the loser out of the way first.
+						loser_dir = os.path.dirname(loser_src)
+						if not loser_dir or (not os.path.isdir(loser_dir)):
+							raise FileNotFoundError()
+						winner_orig_norm = _norm(winner_src)
+						loser_orig_norm = _norm(loser_src)
+						temp_path = ""
+						for counter in range(10):
+							cand = os.path.join(loser_dir, f".__ai_tmp__collision__{row_id}__{counter}.pdf")
+							if os.path.exists(cand):
+								continue
+							cand_norm = _norm(cand)
+							if cand_norm in {winner_orig_norm, loser_orig_norm, canonical_norm}:
+								continue
+							temp_path = cand
+							break
+						if not temp_path:
+							raise FileNotFoundError()
+
+						loser_temp_norm = _attempt_rename(loser_orig_norm, temp_path)
+						if loser_temp_norm is None:
+							raise OSError()
+
+						# Rename winner to canonical now that canonical is free.
+						if winner_orig_norm == canonical_norm:
+							winner_new_norm = winner_orig_norm
+						else:
+							if os.path.exists(canonical_target) and canonical_norm != winner_orig_norm:
+								_attempt_rename(_norm(loser_temp_norm), loser_src)
+								raise FileExistsError()
+							winner_new_norm = _attempt_rename(winner_orig_norm, canonical_target) or ""
+							if not winner_new_norm:
+								_attempt_rename(_norm(loser_temp_norm), loser_src)
+								raise OSError()
+
+						q_dir = os.path.join(source_root, "quarantine")
+						os.makedirs(q_dir, exist_ok=True)
+						base_name = os.path.basename(loser_src)
+						stem, ext = os.path.splitext(base_name)
+						if not ext:
+							ext = ".pdf"
+						target = os.path.join(q_dir, base_name)
+						if os.path.exists(target):
+							i = 2
+							while True:
+								cand = os.path.join(q_dir, f"{stem}__{i}{ext}")
+								if not os.path.exists(cand):
+									target = cand
+									break
+								i += 1
+
+						try:
+							os.replace(loser_temp_norm, target)
+						except OSError as e:
+							if getattr(e, "errno", None) == errno.EXDEV:
+								import shutil
+
+								shutil.move(loser_temp_norm, target)
+							else:
+								raise
+						ok = True
+					except Exception:
+						if winner_new_norm and _norm(winner_src) != _norm(winner_new_norm):
+							_attempt_rename(_norm(winner_new_norm), winner_src)
+						if loser_temp_norm:
+							_attempt_rename(_norm(loser_temp_norm), loser_src)
+						ok = False
+
+					try:
+						self.after(0, lambda: _apply_unify_result(ok, loser_id, loser_src, winner_id, winner_new_norm))
+					except Exception:
+						pass
+
+				threading.Thread(
+					target=_unify_worker,
+					args=(loser_id, loser_src, source_root, winner_id, winner_src, winner_display_name),
+					name="UnifyWorker",
+					daemon=True,
+				).start()
+
 			btns2 = ttk.Frame(resolver, padding=(12, 0, 12, 12))
 			btns2.grid(row=1, column=0, sticky="e")
+			ttk.Button(btns2, text="Unify (keep this row)", command=_on_unify).grid(row=0, column=0, padx=(0, 8))
 			save_btn = ttk.Button(btns2, text="Save", state="disabled", command=_on_save)
-			save_btn.grid(row=0, column=0, padx=(0, 8))
-			ttk.Button(btns2, text="Cancel", command=resolver.destroy).grid(row=0, column=1)
+			save_btn.grid(row=0, column=1, padx=(0, 8))
+			ttk.Button(btns2, text="Cancel", command=resolver.destroy).grid(row=0, column=2)
 
 			rename_a_var.trace_add("write", _sync_save_enabled)
 			rename_b_var.trace_add("write", _sync_save_enabled)

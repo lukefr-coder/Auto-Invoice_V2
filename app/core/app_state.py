@@ -76,7 +76,7 @@ def _is_pdf(path: str) -> bool:
 def _quarantine_root(state: AppState) -> str:
 	if not state.source_path:
 		return ""
-	return normalize_path(os.path.join(state.source_path, "_quarantine"))
+	return normalize_path(os.path.join(state.source_path, "quarantine"))
 
 
 def _is_under_quarantine(state: AppState, norm_path: str) -> bool:
