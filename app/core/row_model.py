@@ -33,3 +33,4 @@ class RowModel:
 	source_path: str = ""
 	display_name: str = "!"
 	fingerprint_sha256: str = ""
+	origin_seq: int = 0

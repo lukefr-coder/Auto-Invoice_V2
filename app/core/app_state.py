@@ -233,7 +233,8 @@ def add_row_from_phase1_result(state: AppState, *, res: Phase1Result) -> bool:
 	if res.kind == "duplicate_skipped":
 		return False
 
-	row_id = f"p1_{state.next_row_seq:04d}"
+	origin_seq = state.next_row_seq
+	row_id = f"p1_{origin_seq:04d}"
 	state.next_row_seq += 1
 
 	display_name = res.doc_no.strip() if res.doc_no and res.doc_no != "!" else "!"
@@ -257,6 +258,7 @@ def add_row_from_phase1_result(state: AppState, *, res: Phase1Result) -> bool:
 			source_path=final_path,
 			display_name=display_name,
 			fingerprint_sha256=res.fingerprint_sha256 or "",
+			origin_seq=origin_seq,
 		)
 	)
 

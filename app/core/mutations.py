@@ -45,7 +45,11 @@ def apply_filters(state: AppState) -> list[RowModel]:
 		if state.filters.type_filter != "All" and row.file_type != state.filters.type_filter:
 			continue
 		out.append(row)
-	return out
+
+	def _status_rank(status: RowStatus) -> int:
+		return 0 if status == RowStatus.Review else 1
+
+	return sorted(out, key=lambda r: (_status_rank(r.status), -r.origin_seq))
 
 
 def resolve_review_row_manual(
@@ -65,6 +69,8 @@ def resolve_review_row_manual(
 		if row.id != row_id:
 			continue
 
+		prev_status = row.status
+
 		old_canon = (row.display_name or "").strip().casefold()
 
 		display_name = (doc_no or "").strip() or "!"
@@ -76,6 +82,9 @@ def resolve_review_row_manual(
 		row.file_name = file_name
 		row.file_type = ft
 		row.status = status
+		if prev_status == RowStatus.Review and row.status == RowStatus.Ready:
+			row.origin_seq = state.next_row_seq
+			state.next_row_seq += 1
 		new_canon = (row.display_name or "").strip().casefold()
 		if old_canon and old_canon != "!":
 			enforce_display_name_group_status(state, old_canon)
