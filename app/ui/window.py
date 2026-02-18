@@ -1540,13 +1540,37 @@ class AppWindow(ttk.Frame):
 
 		result: tuple[str, FileType] | None = None
 
+		def _doc_no_is_valid() -> bool:
+			stem = _sanitize_windows_filename_stem((doc_var.get() or "").strip())
+			stem = (stem or "").upper()
+			if (not stem) or stem == "!":
+				return False
+			base_pat = r"^\d{6}([A-Z])?$"
+			base = (
+				stem[:-3]
+				if (
+					len(stem) >= 3
+					and stem[-3] == "("
+					and stem[-2] in "123456789"
+					and stem[-1] == ")"
+				)
+				else stem
+			)
+			return re.fullmatch(base_pat, base) is not None
+
 		def on_ok() -> None:
 			nonlocal result
 			doc_no = (doc_var.get() or "").strip()
 			if not doc_no:
 				messagebox.showwarning("Manual Input", "Please enter a document number.")
 				return
+			if not _doc_no_is_valid():
+				messagebox.showwarning("Manual Input", "Document number is invalid.")
+				return
 			ft_str = (type_var.get() or "").strip()
+			if ft_str == FileType.Unknown.value:
+				messagebox.showwarning("Manual Input", "Please select a file type.")
+				return
 			ft = next((t for t in FileType if t.value == ft_str), FileType.Unknown)
 			result = (doc_no, ft)
 			win.destroy()
@@ -1555,10 +1579,34 @@ class AppWindow(ttk.Frame):
 			win.destroy()
 
 		ttk.Button(btns, text="Cancel", command=on_cancel).grid(row=0, column=0, padx=(0, 8))
-		ttk.Button(btns, text="OK", command=on_ok).grid(row=0, column=1)
+		ok_btn = ttk.Button(btns, text="OK", command=on_ok)
+		ok_btn.grid(row=0, column=1)
+
+		def update_ok_enabled() -> None:
+			doc_no = (doc_var.get() or "").strip()
+			ft_str = (type_var.get() or "").strip()
+			valid_doc = bool(doc_no) and _doc_no_is_valid()
+			valid_type = (ft_str != FileType.Unknown.value)
+			try:
+				ok_btn.configure(state=("normal" if (valid_doc and valid_type) else "disabled"))
+			except Exception:
+				pass
+
+		doc_var.trace_add("write", lambda *_: update_ok_enabled())
+		type_combo.bind("<<ComboboxSelected>>", lambda _e: update_ok_enabled())
+		update_ok_enabled()
 
 		win.bind("<Escape>", lambda _e: on_cancel())
-		doc_entry.bind("<Return>", lambda _e: on_ok())
+		def _on_return(_e: tk.Event) -> str:
+			update_ok_enabled()
+			try:
+				if ok_btn.instate(["disabled"]):
+					return "break"
+			except Exception:
+				pass
+			on_ok()
+			return "break"
+		doc_entry.bind("<Return>", _on_return)
 		try:
 			doc_entry.focus_set()
 		except Exception:
