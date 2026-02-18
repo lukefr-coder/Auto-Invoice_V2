@@ -295,6 +295,13 @@ class Phase1Processor:
 	def enqueue(self, batch_id: int, path: str) -> None:
 		self._in.put((batch_id, path))
 
+	def clear_dedupe(self) -> None:
+		"""Clear worker-side dedupe memory safely on the worker thread."""
+		try:
+			self._in.put_nowait((-2, ""))
+		except Exception:
+			pass
+
 	def forget_fingerprint(self, fp: str) -> None:
 		fp = (fp or "").strip().lower()
 		if not fp:
@@ -320,6 +327,13 @@ class Phase1Processor:
 	def _run(self) -> None:
 		while not self._stop.is_set():
 			batch_id, original_path = self._in.get()
+			if batch_id == -2:
+				try:
+					self._seen_fingerprints.clear()
+					self._canonical_path_by_fp.clear()
+				except Exception:
+					pass
+				continue
 			if batch_id < 0:
 				return
 			self._emit("running", batch_id, original_path)

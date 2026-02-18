@@ -21,7 +21,7 @@ from core.app_state import (
 	reset_watch_state,
 	start_next_batch_if_idle,
 )
-from core.row_model import FileType, RowStatus
+from core.row_model import FileType, RowModel, RowStatus
 from services.watcher import (
 	FolderWatcher,
 	Phase1Processor,
@@ -87,8 +87,12 @@ class AppWindow(ttk.Frame):
 		self._sync_viewing_text()
 		self.source_var.trace_add("write", lambda *_: self._sync_viewing_text())
 
+		self.clear_cache_btn: ttk.Button | None = None
 		self._build_layout()
+		self._restore_history_state()
+		self.files_grid.refresh()
 		self._sync_file_count()
+		self._sync_clear_cache_enabled()
 		self._center_window_once()
 
 		# Slice 03/04A: background watching + Phase-1 stub processing (no Tk calls off-thread).
@@ -106,6 +110,230 @@ class AppWindow(ttk.Frame):
 			self.master.protocol("WM_DELETE_WINDOW", self._on_close)
 		except Exception:
 			pass
+
+	def _row_to_history_dict(self, r: RowModel) -> dict:
+		return {
+			"id": getattr(r, "id", ""),
+			"file_name": getattr(r, "file_name", ""),
+			"file_type": getattr(getattr(r, "file_type", FileType.Unknown), "value", str(getattr(r, "file_type", ""))),
+			"date_str": getattr(r, "date_str", ""),
+			"account_str": getattr(r, "account_str", ""),
+			"total_str": getattr(r, "total_str", ""),
+			"status": getattr(getattr(r, "status", RowStatus.Review), "value", str(getattr(r, "status", ""))),
+			"checked": bool(getattr(r, "checked", False)),
+			"checkbox_enabled": bool(getattr(r, "checkbox_enabled", False)),
+			"source_path": getattr(r, "source_path", ""),
+			"display_name": getattr(r, "display_name", "!"),
+			"fingerprint_sha256": getattr(r, "fingerprint_sha256", ""),
+			"origin_seq": int(getattr(r, "origin_seq", 0) or 0),
+		}
+
+	def _row_from_history_dict(self, d: dict) -> RowModel | None:
+		try:
+			row_id = str(d.get("id") or "").strip()
+			if not row_id:
+				return None
+			raw_ft = d.get("file_type")
+			try:
+				file_type = FileType(raw_ft) if raw_ft else FileType.Unknown
+			except Exception:
+				file_type = FileType.Unknown
+			raw_st = d.get("status")
+			try:
+				status = RowStatus(raw_st) if raw_st else RowStatus.Review
+			except Exception:
+				status = RowStatus.Review
+			origin_seq = 0
+			try:
+				origin_seq = int(d.get("origin_seq") or 0)
+			except Exception:
+				origin_seq = 0
+			return RowModel(
+				id=row_id,
+				file_name=str(d.get("file_name") or ""),
+				file_type=file_type,
+				date_str=str(d.get("date_str") or ""),
+				account_str=str(d.get("account_str") or ""),
+				total_str=str(d.get("total_str") or ""),
+				status=status,
+				checked=bool(d.get("checked") or False),
+				checkbox_enabled=bool(d.get("checkbox_enabled") or False),
+				source_path=str(d.get("source_path") or ""),
+				display_name=str(d.get("display_name") or "!"),
+				fingerprint_sha256=str(d.get("fingerprint_sha256") or ""),
+				origin_seq=origin_seq,
+			)
+		except Exception:
+			return None
+
+	def _history_dict_from_state(self) -> dict:
+		known = getattr(self.state, "known_fingerprints", set()) or set()
+		try:
+			known_list = sorted([fp for fp in known if isinstance(fp, str) and fp])
+		except Exception:
+			known_list = []
+		return {
+			"schema_version": 1,
+			"next_row_seq": int(getattr(self.state, "next_row_seq", 1) or 1),
+			"known_fingerprints": known_list,
+			"rows": [self._row_to_history_dict(r) for r in (getattr(self.state, "rows", []) or [])],
+		}
+
+	def _persist_history_state(self) -> None:
+		try:
+			self._prune_history_rows_if_needed()
+			persistence.save_history_state(self._history_dict_from_state())
+		except Exception:
+			pass
+
+	def _prune_history_rows_if_needed(self) -> bool:
+		rows = getattr(self.state, "rows", None)
+		if not rows or len(rows) <= 500:
+			return False
+		try:
+			sorted_rows = sorted(rows, key=lambda r: int(getattr(r, "origin_seq", 0) or 0))
+		except Exception:
+			sorted_rows = list(rows)
+		self.state.rows = sorted_rows[-500:]
+		return True
+
+	def _cleanup_missing_sources_once(self) -> bool:
+		changed = False
+		kept: list[RowModel] = []
+		removed_canons: set[str] = set()
+		known_fp = getattr(self.state, "known_fingerprints", None)
+		for r in list(getattr(self.state, "rows", []) or []):
+			try:
+				if r.status == RowStatus.Processed:
+					kept.append(r)
+					continue
+				src = (r.source_path or "").strip()
+				if src and os.path.exists(src):
+					kept.append(r)
+				else:
+					changed = True
+					fp = (getattr(r, "fingerprint_sha256", "") or "").strip().lower()
+					if fp and hasattr(known_fp, "discard"):
+						try:
+							known_fp.discard(fp)
+						except Exception:
+							pass
+					canon = (getattr(r, "display_name", "") or "").strip().casefold()
+					if canon and canon != "!":
+						removed_canons.add(canon)
+			except Exception:
+				kept.append(r)
+		if changed:
+			self.state.rows = kept
+			for canon in removed_canons:
+				enforce_display_name_group_status(self.state, canon)
+		return changed
+
+	def _restore_history_state(self) -> None:
+		try:
+			data = persistence.load_history_state()
+		except Exception:
+			return
+		if not isinstance(data, dict):
+			return
+
+		rows: list[RowModel] = []
+		try:
+			for rd in (data.get("rows") or []):
+				if isinstance(rd, dict):
+					row = self._row_from_history_dict(rd)
+					if row is not None:
+						rows.append(row)
+		except Exception:
+			rows = []
+
+		known: set[str] = set()
+		try:
+			for fp in (data.get("known_fingerprints") or []):
+				if isinstance(fp, str) and fp:
+					known.add(fp.strip().lower())
+		except Exception:
+			pass
+
+		try:
+			next_row_seq = int(data.get("next_row_seq") or 1)
+		except Exception:
+			next_row_seq = 1
+
+		self.state.rows = rows
+		self.state.known_fingerprints = known
+		self.state.next_row_seq = max(1, next_row_seq)
+
+		changed = False
+		changed = self._cleanup_missing_sources_once() or changed
+		changed = self._prune_history_rows_if_needed() or changed
+		if changed:
+			self._persist_history_state()
+
+	def _is_busy_for_clear_cache(self) -> bool:
+		try:
+			if getattr(self.state, "active_batch", None) is not None:
+				return True
+			pending = getattr(self.state, "pending_paths", None)
+			if pending and len(pending) > 0:
+				return True
+			wq = getattr(self.state, "work_queue", None) or []
+			for item in wq:
+				if getattr(item, "status", "") != "done":
+					return True
+			return False
+		except Exception:
+			return True
+
+	def _sync_clear_cache_enabled(self) -> None:
+		btn = self.clear_cache_btn
+		if btn is None:
+			return
+		try:
+			btn.configure(state=("disabled" if self._is_busy_for_clear_cache() else "normal"))
+		except Exception:
+			pass
+
+	def _on_clear_cache_clicked(self) -> None:
+		if self._is_busy_for_clear_cache():
+			return
+		ok = messagebox.askyesno(
+			"Clear cache",
+			"This will clear all history and in-progress items. Folder selections will be kept.\n\nContinue?",
+		)
+		if not ok:
+			return
+
+		try:
+			persistence.delete_history_state()
+		except Exception:
+			pass
+
+		try:
+			self.state.rows = []
+			self.state.known_fingerprints = set()
+			self.state.next_row_seq = 1
+			self.state.next_batch_id = 1
+			self.state.phase1_completed_paths.clear()
+		except Exception:
+			pass
+		try:
+			reset_watch_state(self.state)
+		except Exception:
+			pass
+		try:
+			self._worker.clear_dedupe()
+		except Exception:
+			pass
+
+		try:
+			self.files_grid.refresh()
+			self._sync_file_count()
+			self._sync_deposit_enabled()
+		except Exception:
+			pass
+		self._sync_clear_cache_enabled()
+		self._restart_watcher_if_possible()
 
 	def _source_key(self) -> str:
 		return persistence._KEYS[0]
@@ -131,6 +359,10 @@ class AppWindow(ttk.Frame):
 		save_settings(self._settings)
 
 	def _on_close(self) -> None:
+		try:
+			self._persist_history_state()
+		except Exception:
+			pass
 		# Ensure background threads stop cleanly.
 		try:
 			if self._watcher is not None:
@@ -169,6 +401,7 @@ class AppWindow(ttk.Frame):
 		self._watcher.start()
 
 	def _poll_background(self) -> None:
+		self._sync_clear_cache_enabled()
 		# Ensure watcher is running when a valid Source exists.
 		# This keeps wiring reliable even if Source is loaded after init.
 		if self.state.source_path and (
@@ -222,6 +455,10 @@ class AppWindow(ttk.Frame):
 						continue
 					if add_row_from_phase1_result(self.state, res=res):
 						self.files_grid.refresh()
+						if self._prune_history_rows_if_needed():
+							self.files_grid.refresh()
+						self._sync_file_count()
+						self._persist_history_state()
 
 		# Reconcile deleted/missing files (UI-thread only): remove non-Processed rows whose source no longer exists,
 		# and recompute collision groups for impacted display names.
@@ -263,6 +500,7 @@ class AppWindow(ttk.Frame):
 		if removed_any:
 			self.files_grid.refresh()
 			self._sync_file_count()
+			self._persist_history_state()
 
 		# If the active batch just completed, linger the final status briefly.
 		if prev_batch is not None and self.state.active_batch is None and prev_batch.done_count >= prev_batch.total:
@@ -280,6 +518,7 @@ class AppWindow(ttk.Frame):
 		# Update status text.
 		self._render_background_status(did_discover=drained_any)
 		self._sync_deposit_enabled()
+		self._sync_clear_cache_enabled()
 		self.after(100, self._poll_background)
 
 	def _render_background_status(self, *, did_discover: bool) -> None:
@@ -462,7 +701,14 @@ class AppWindow(ttk.Frame):
 		right_hdr = ttk.Frame(header_strip)
 		right_hdr.grid(row=0, column=2, sticky="e")
 		ttk.Label(right_hdr, textvariable=self.file_count_var).grid(row=0, column=0, padx=(0, 6))
-		ttk.Button(right_hdr, text="🗑", width=3, state="disabled").grid(row=0, column=1)
+		self.clear_cache_btn = ttk.Button(
+			right_hdr,
+			text="🗑",
+			width=3,
+			state="disabled",
+			command=self._on_clear_cache_clicked,
+		)
+		self.clear_cache_btn.grid(row=0, column=1)
 
 		table_frame = ttk.Frame(files_frame)
 		table_frame.grid(row=1, column=0, sticky="nsew")
@@ -538,6 +784,8 @@ class AppWindow(ttk.Frame):
 				if fname.casefold() in existing:
 					row.status = RowStatus.Review
 					collided_any = True
+		if collided_any:
+			self._persist_history_state()
 
 		# B) Build rows_to_move candidates.
 		rows_to_move = [r for r in self.state.rows if r.status == RowStatus.Ready]
@@ -622,6 +870,7 @@ class AppWindow(ttk.Frame):
 		if changed:
 			self.files_grid.refresh()
 			self._sync_file_count()
+			self._persist_history_state()
 		self._sync_deposit_enabled()
 
 	def _browse_source(self) -> None:
@@ -686,6 +935,7 @@ class AppWindow(ttk.Frame):
 			row.status = old_status
 			self.files_grid.refresh()
 			self.status_bar.set_success("Saved")
+			self._persist_history_state()
 			return
 
 		src_path = row.source_path
@@ -716,6 +966,7 @@ class AppWindow(ttk.Frame):
 		if ok:
 			self.files_grid.refresh()
 			self.status_bar.set_success("Saved")
+			self._persist_history_state()
 
 	def _show_collision_review_dialog(self, row_id: str) -> None:
 		row = next((r for r in self.state.rows if r.id == row_id), None)
@@ -868,6 +1119,7 @@ class AppWindow(ttk.Frame):
 
 					self.files_grid.refresh()
 					self.status_bar.set_success("Saved")
+					self._persist_history_state()
 					resolver.destroy()
 
 				def _on_unify() -> None:
@@ -905,6 +1157,7 @@ class AppWindow(ttk.Frame):
 						self.files_grid.refresh()
 						self._sync_file_count()
 						self._sync_deposit_enabled()
+						self._persist_history_state()
 						resolver.destroy()
 
 					def _unify_worker(old_src: str, source_root: str) -> None:
@@ -1180,6 +1433,7 @@ class AppWindow(ttk.Frame):
 
 				self.files_grid.refresh()
 				self.status_bar.set_success("Saved")
+				self._persist_history_state()
 				resolver.destroy()
 
 			def _on_unify() -> None:
@@ -1234,6 +1488,7 @@ class AppWindow(ttk.Frame):
 					self.files_grid.refresh()
 					self._sync_file_count()
 					self._sync_deposit_enabled()
+					self._persist_history_state()
 					resolver.destroy()
 
 				def _unify_worker(loser_id: str, loser_src: str, source_root: str, winner_id: str, winner_src: str, winner_display_name: str) -> None:
