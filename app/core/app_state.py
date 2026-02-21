@@ -219,6 +219,14 @@ def add_row_from_phase1_result(state: AppState, *, res: Phase1Result) -> bool:
 	# different path string due to rename-triggered fs events), treat it as
 	# already handled and avoid creating a second row.
 	if res.fingerprint_sha256 and res.fingerprint_sha256 in state.known_fingerprints:
+		fp = (getattr(res, "fingerprint_sha256", "") or "").strip().lower()
+		if fp and getattr(res, "renamed_path", None):
+			rn = normalize_path(res.renamed_path)
+			if rn:
+				for r in state.rows:
+					if (getattr(r, "fingerprint_sha256", "") or "").strip().lower() == fp:
+						r.source_path = rn
+						break
 		state.phase1_completed_paths.add(orig_norm)
 		return False
 
