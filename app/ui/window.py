@@ -88,9 +88,8 @@ class AppWindow(ttk.Frame):
 		self.source_var.trace_add("write", lambda *_: self._sync_viewing_text())
 
 		self.clear_cache_btn: ttk.Button | None = None
-		self._build_layout()
 		self._restore_history_state()
-		self.files_grid.refresh()
+		self._build_layout()
 		self._sync_file_count()
 		self._sync_clear_cache_enabled()
 		self._center_window_once()
