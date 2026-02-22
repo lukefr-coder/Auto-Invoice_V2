@@ -985,8 +985,16 @@ class AppWindow(ttk.Frame):
 			if (r.display_name or "").strip().casefold() == canon
 		]
 
+		# display_name groups can include Processed/history rows; only rows backed by an existing source file are rename targets.
+		renameable_rows = [
+			r
+			for r in group2
+			if r.source_path and os.path.exists(r.source_path) and r.status != RowStatus.Processed
+		]
+
 		# Destination collision case: a single row is blocked by an existing PDF in the destination folder.
-		if row.status == RowStatus.Review and len(group2) == 1:
+		if row.status == RowStatus.Review and len(renameable_rows) == 1:
+			row = renameable_rows[0]
 			dest = (self.state.dest_path or "").strip()
 			stem0 = _sanitize_windows_filename_stem(row.display_name)
 			competitor = os.path.join(dest, f"{stem0}.pdf") if dest and stem0 and stem0 != "!" else ""
@@ -1233,8 +1241,8 @@ class AppWindow(ttk.Frame):
 				self.master.wait_window(resolver)
 				return
 
-		if row.status == RowStatus.Review and len(group2) == 2:
-			row_a, row_b = sorted(group2, key=lambda r: r.id)
+		if row.status == RowStatus.Review and len(renameable_rows) == 2:
+			row_a, row_b = sorted(renameable_rows, key=lambda r: r.id)
 
 			resolver = tk.Toplevel(self)
 			resolver.title("Collision Review")
