@@ -242,8 +242,8 @@ class FilesGrid(ttk.Frame):
 				self.on_visible_count_changed()
 
 	def _row_values(self, row: RowModel) -> tuple[str, str, str, str, str, str, str]:
-		eligible = row.checkbox_enabled
-		checkbox_text = "☑" if (eligible and row.checked) else ("☐" if eligible else "")
+		show_checkbox = row.file_type in {FileType.TaxInvoice, FileType.Proforma}
+		checkbox_text = ("☑" if row.checked else "☐") if show_checkbox else ""
 		doc_type = _ENUM_TO_DOC_TYPE.get(row.file_type, row.file_type.value)
 		display = row.display_name if (row.display_name and row.display_name != "!") else row.file_name
 		return (
