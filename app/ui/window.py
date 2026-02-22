@@ -35,6 +35,7 @@ from state.persistence import load_settings, save_settings
 from ui.grid import FilesGrid
 from ui.pdf_preview import PdfPage1Preview
 from ui.status_bar import StatusBar
+from ui.calibration_window import CalibrationWindow
 
 
 def _white_address_entry(master: tk.Misc, textvariable: tk.StringVar) -> tk.Entry:
@@ -88,6 +89,7 @@ class AppWindow(ttk.Frame):
 		self.source_var.trace_add("write", lambda *_: self._sync_viewing_text())
 
 		self.clear_cache_btn: ttk.Button | None = None
+		self._calibration_button: ttk.Button | None = None
 		self._restore_history_state()
 		self._build_layout()
 		self._sync_file_count()
@@ -678,7 +680,13 @@ class AppWindow(ttk.Frame):
 		left_opts.grid(row=0, column=0, sticky="w")
 		ttk.Button(left_opts, text="...", width=3, state="disabled").grid(row=0, column=0, padx=(0, 8))
 		ttk.Button(left_opts, text="Export Data (.xlsx)", state="disabled").grid(row=0, column=1)
-		ttk.Button(options_frame, text="⚙ Calibration", state="disabled").grid(row=0, column=1, sticky="e")
+		self._calibration_button = ttk.Button(
+			options_frame,
+			text="⚙ Calibration",
+			state="normal",
+			command=self._open_calibration_window,
+		)
+		self._calibration_button.grid(row=0, column=1, sticky="e")
 
 		# Files
 		files_frame = ttk.LabelFrame(self, text="Files", padding=(10, 6))
@@ -904,6 +912,22 @@ class AppWindow(ttk.Frame):
 	def _browse_directory(initial: str | None) -> str:
 		selected = filedialog.askdirectory(initialdir=initial, mustexist=False)
 		return selected or ""
+
+	def _open_calibration_window(self) -> None:
+		win = CalibrationWindow(self)
+		try:
+			win.transient(self.master)
+		except Exception:
+			pass
+
+		self._center_toplevel(win)
+
+		try:
+			win.grab_set()
+		except Exception:
+			pass
+
+		self.master.wait_window(win)
 
 	def _manual_input_for_row(self, row_id: str) -> None:
 		row = next((r for r in self.state.rows if r.id == row_id), None)

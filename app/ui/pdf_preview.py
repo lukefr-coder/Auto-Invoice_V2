@@ -60,9 +60,9 @@ class PdfPage1Preview(ttk.Frame):
 		self._canvas.bind("<MouseWheel>", self._on_mousewheel, add=True)
 		self._canvas.bind("<Button-4>", self._on_button4, add=True)
 		self._canvas.bind("<Button-5>", self._on_button5, add=True)
-		self._canvas.bind("<ButtonPress-1>", self._on_button_press_1, add=True)
-		self._canvas.bind("<B1-Motion>", self._on_b1_motion, add=True)
-		self._canvas.bind("<ButtonRelease-1>", self._on_button_release_1, add=True)
+		self._canvas.bind("<ButtonPress-2>", self._on_button_press_1, add=True)
+		self._canvas.bind("<B2-Motion>", self._on_b1_motion, add=True)
+		self._canvas.bind("<ButtonRelease-2>", self._on_button_release_1, add=True)
 
 	def clear(self) -> None:
 		self._path = None
