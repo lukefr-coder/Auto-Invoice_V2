@@ -933,7 +933,7 @@ class AppWindow(ttk.Frame):
 		row = next((r for r in self.state.rows if r.id == row_id), None)
 		if row is None:
 			return
-		if row.status != RowStatus.Review:
+		if row.status == RowStatus.Processed:
 			return
 
 		old_display_name = row.display_name

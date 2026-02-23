@@ -68,6 +68,8 @@ def resolve_review_row_manual(
 	for row in state.rows:
 		if row.id != row_id:
 			continue
+		if row.status == RowStatus.Processed:
+			return False
 
 		prev_status = row.status
 

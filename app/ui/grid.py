@@ -148,7 +148,9 @@ class FilesGrid(ttk.Frame):
 
 		row = next((r for r in self._state.rows if r.id == row_id), None)
 		manual_eligible = bool(
-			row is not None and row.status == RowStatus.Review and self.on_manual_input_requested is not None
+			row is not None
+			and row.status in (RowStatus.Ready, RowStatus.Review)
+			and self.on_manual_input_requested is not None
 		)
 		collision_eligible = bool(
 			row is not None
