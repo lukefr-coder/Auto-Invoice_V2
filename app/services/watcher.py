@@ -11,6 +11,12 @@ from dataclasses import dataclass as _dc
 
 from core.app_state import Phase1Result
 from core.row_model import FileType
+from services.ocr_runtime import (
+	is_profile_complete,
+	load_ocr_profile,
+	ocr_pixmap,
+	render_normalized_roi_to_pixmap,
+)
 
 
 def _norm(path: str) -> str:
@@ -98,6 +104,11 @@ class FolderWatcher:
 			time.sleep(self._poll_interval_s)
 
 	def _scan_once(self, source: str, quarantine: str) -> None:
+		profile_ok = False
+		try:
+			profile_ok = is_profile_complete(load_ocr_profile())
+		except Exception:
+			profile_ok = False
 		seen_now: set[str] = set()
 		# Walk the source tree, skipping quarantine.
 		for root, dirs, files in os.walk(source):
@@ -140,6 +151,8 @@ class FolderWatcher:
 					prev.emitted = False
 
 				if (not prev.emitted) and prev.stable_ticks >= self._required_stable_ticks:
+					if not profile_ok:
+						continue
 					prev.emitted = True
 					try:
 						self._out_queue.put_nowait(norm)
@@ -184,7 +197,7 @@ def _classify_file_type_from_text(text: str) -> FileType:
 		return FileType.Proforma
 	if "CREDIT" in t and "NOTE" in t:
 		return FileType.Credit
-	if "PURCHASE ORDER" in t:
+	if "DELIVERY DOCKET" in t:
 		return FileType.Order
 	if "TRANSFER" in t:
 		return FileType.Transfer
@@ -202,33 +215,70 @@ _DOCNO_PATTERNS: list[re.Pattern[str]] = [
 def _extract_doc_no_from_text(text: str) -> str:
 	if not text:
 		return "!"
-	sample = text[:4000]
-	cands: set[str] = set()
-	for pat in _DOCNO_PATTERNS:
-		for m in pat.finditer(sample):
-			cand = (m.group(1) or "").strip().rstrip(".:")
-			if cand:
-				cands.add(cand)
+	t = (text or "").upper()
+	pat = re.compile(r"(?<![A-Z0-9])(\d{6}(?:[A-Z])?(?:\([1-9]\))?)(?![A-Z0-9])")
+	matches = pat.findall(t)
+	cands: set[str] = {m for m in matches if m}
 	if len(cands) != 1:
 		return "!"
 	return next(iter(cands))
 
 
 def _parse_phase1_from_pdf_page1(path: str) -> _Phase1Parsed:
-	try:
-		from pypdf import PdfReader  # type: ignore
-	except Exception:
+	profile = load_ocr_profile()
+	if not is_profile_complete(profile):
 		return _Phase1Parsed(doc_no="!", file_type=FileType.Unknown)
+
 	try:
-		reader = PdfReader(path)
-		if not reader.pages:
-			return _Phase1Parsed(doc_no="!", file_type=FileType.Unknown)
-		text = reader.pages[0].extract_text() or ""
-		doc_no = _extract_doc_no_from_text(text)
-		file_type = _classify_file_type_from_text(text)
-		return _Phase1Parsed(doc_no=doc_no or "!", file_type=file_type)
+		roi = ((profile.get("primary_file_type") or {}) if isinstance(profile.get("primary_file_type"), dict) else {}).get(
+			"file_type_roi"
+		)
+		dpi = int((roi or {}).get("dpi") or 150)
+		pix = render_normalized_roi_to_pixmap(path, 0, dpi=dpi, roi=roi or {})
+		ft_text = ocr_pixmap(pix, psm=6, lang="eng")
 	except Exception:
-		return _Phase1Parsed(doc_no="!", file_type=FileType.Unknown)
+		ft_text = ""
+
+	file_type = _classify_file_type_from_text(ft_text)
+	section_key = ""
+	if file_type == FileType.TaxInvoice:
+		section_key = "tax_invoice"
+	elif file_type == FileType.Proforma:
+		section_key = "proforma"
+	elif file_type == FileType.Order:
+		section_key = "order"
+	elif file_type == FileType.Transfer:
+		section_key = "transfer"
+	elif file_type == FileType.Credit:
+		section_key = "credit"
+
+	doc_no = "!"
+	try:
+		if section_key:
+			roi = ((profile.get(section_key) or {}) if isinstance(profile.get(section_key), dict) else {}).get("doc_no")
+			dpi = int((roi or {}).get("dpi") or 150)
+			pix = render_normalized_roi_to_pixmap(path, 0, dpi=dpi, roi=roi or {})
+			text = ocr_pixmap(pix, psm=6, lang="eng")
+			doc_no = _extract_doc_no_from_text(text) or "!"
+		else:
+			# Credit fallback: Unknown -> OCR credit.doc_no; if valid, classify as Credit.
+			roi = ((profile.get("credit") or {}) if isinstance(profile.get("credit"), dict) else {}).get("doc_no")
+			dpi = int((roi or {}).get("dpi") or 150)
+			pix = render_normalized_roi_to_pixmap(path, 0, dpi=dpi, roi=roi or {})
+			text = ocr_pixmap(pix, psm=6, lang="eng")
+			cand = _extract_doc_no_from_text(text) or "!"
+			if cand != "!":
+				file_type = FileType.Credit
+				doc_no = cand
+			else:
+				file_type = FileType.Unknown
+				doc_no = "!"
+	except Exception:
+		doc_no = "!"
+		if not isinstance(file_type, FileType):
+			file_type = FileType.Unknown
+
+	return _Phase1Parsed(doc_no=doc_no or "!", file_type=file_type if isinstance(file_type, FileType) else FileType.Unknown)
 
 
 def _choose_collision_free_path(dir_path: str, base_stem: str, *, ext: str = ".pdf") -> str:
@@ -340,6 +390,8 @@ class Phase1Processor:
 			orig_norm = _norm(original_path)
 			try:
 				if not orig_norm or not os.path.exists(orig_norm):
+					continue
+				if not is_profile_complete(load_ocr_profile()):
 					continue
 
 				fp = ""
