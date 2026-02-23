@@ -728,6 +728,7 @@ class AppWindow(ttk.Frame):
 		self.files_grid.on_visible_count_changed = lambda *_: self._sync_file_count()
 		self.files_grid.on_manual_input_requested = self._manual_input_for_row
 		self.files_grid.on_collision_review_requested = self._show_collision_review_dialog
+		self.files_grid.on_open_file_requested = self._open_file_for_row
 
 		bottom_strip = ttk.Frame(files_frame)
 		bottom_strip.grid(row=2, column=0, sticky="ew", pady=(6, 0))
@@ -990,6 +991,24 @@ class AppWindow(ttk.Frame):
 			self.files_grid.refresh()
 			self.status_bar.set_success("Saved")
 			self._persist_history_state()
+
+	def _open_file_for_row(self, row_id: str) -> None:
+		row = next((r for r in self.state.rows if r.id == row_id), None)
+		if row is None:
+			return
+
+		if row.status not in (RowStatus.Ready, RowStatus.Review):
+			return
+
+		path = row.source_path
+		if not path or not os.path.exists(path):
+			messagebox.showerror("Open File", "File not found.")
+			return
+
+		try:
+			os.startfile(path)
+		except Exception:
+			messagebox.showerror("Open File", "Unable to open file.")
 
 	def _show_collision_review_dialog(self, row_id: str) -> None:
 		row = next((r for r in self.state.rows if r.id == row_id), None)

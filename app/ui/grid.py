@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tkinter as tk
 from tkinter import ttk
 
@@ -65,6 +66,7 @@ class FilesGrid(ttk.Frame):
 		self.on_visible_count_changed = None
 		self.on_manual_input_requested = None
 		self.on_collision_review_requested = None
+		self.on_open_file_requested = None
 
 		self._build_ui()
 		self.refresh()
@@ -158,6 +160,13 @@ class FilesGrid(ttk.Frame):
 			and (row.display_name or "!") != "!"
 			and self.on_collision_review_requested is not None
 		)
+		open_file_eligible = bool(
+			row is not None
+			and row.status in (RowStatus.Ready, RowStatus.Review)
+			and row.source_path
+			and os.path.exists(row.source_path)
+			and self.on_open_file_requested is not None
+		)
 
 		menu = tk.Menu(self.tree, tearoff=0)
 		try:
@@ -177,6 +186,14 @@ class FilesGrid(ttk.Frame):
 				except TypeError:
 					self.on_manual_input_requested()
 
+			def _do_open_file() -> None:
+				if self.on_open_file_requested is None:
+					return
+				try:
+					self.on_open_file_requested(row_id)
+				except TypeError:
+					self.on_open_file_requested()
+
 			menu.add_command(
 				label="Manual Input...",
 				command=_do_manual_input,
@@ -186,6 +203,11 @@ class FilesGrid(ttk.Frame):
 				label="Collision Review...",
 				command=_do_collision_review,
 				state=("normal" if collision_eligible else "disabled"),
+			)
+			menu.add_command(
+				label="Open File",
+				command=_do_open_file,
+				state=("normal" if open_file_eligible else "disabled"),
 			)
 
 			menu.tk_popup(event.x_root, event.y_root)
