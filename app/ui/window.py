@@ -89,6 +89,13 @@ class AppWindow(ttk.Frame):
 		self.source_var.trace_add("write", lambda *_: self._sync_viewing_text())
 
 		self.clear_cache_btn: ttk.Button | None = None
+		self._export_browse_btn: ttk.Button | None = None
+		self._export_btn: ttk.Button | None = None
+		self._export_inflight: bool = False
+		self._export_spinner_canvas: tk.Canvas | None = None
+		self._export_spinner_ids: list[int] = []
+		self._export_spinner_after: str | None = None
+		self._export_spinner_frame: int = 0
 		self._calibration_button: ttk.Button | None = None
 		self._restore_history_state()
 		self._build_layout()
@@ -519,6 +526,7 @@ class AppWindow(ttk.Frame):
 		# Update status text.
 		self._render_background_status(did_discover=drained_any)
 		self._sync_deposit_enabled()
+		self._sync_export_enabled()
 		self._sync_clear_cache_enabled()
 		self.after(100, self._poll_background)
 
@@ -678,8 +686,10 @@ class AppWindow(ttk.Frame):
 
 		left_opts = ttk.Frame(options_frame)
 		left_opts.grid(row=0, column=0, sticky="w")
-		ttk.Button(left_opts, text="...", width=3, state="disabled").grid(row=0, column=0, padx=(0, 8))
-		ttk.Button(left_opts, text="Export Data (.xlsx)", state="disabled").grid(row=0, column=1)
+		self._export_browse_btn = ttk.Button(left_opts, text="...", width=3, state="disabled", command=self._browse_export)
+		self._export_browse_btn.grid(row=0, column=0, padx=(0, 8))
+		self._export_btn = ttk.Button(left_opts, text="Export Data (.xlsx)", state="disabled", command=self._on_export_clicked)
+		self._export_btn.grid(row=0, column=1)
 		self._calibration_button = ttk.Button(
 			options_frame,
 			text="⚙ Calibration",
@@ -699,6 +709,28 @@ class AppWindow(ttk.Frame):
 		header_strip.columnconfigure(0, weight=1)
 		header_strip.columnconfigure(1, weight=1)
 		header_strip.columnconfigure(2, weight=1)
+
+		self._export_spinner_canvas = tk.Canvas(header_strip, width=24, height=24, highlightthickness=0)
+		self._export_spinner_ids = []
+		sz = 5
+		gap = 2
+		ox0 = 2
+		oy0 = 2
+		for rr in range(3):
+			for cc in range(3):
+				x = ox0 + cc * (sz + gap)
+				y = oy0 + rr * (sz + gap)
+				rid = self._export_spinner_canvas.create_rectangle(
+					x,
+					y,
+					x + sz,
+					y + sz,
+					fill="gray75",
+					outline="gray75",
+				)
+				self._export_spinner_ids.append(int(rid))
+		self._export_spinner_canvas.grid(row=0, column=0, sticky="w")
+		self._export_spinner_canvas.grid_remove()
 
 		ttk.Label(header_strip, text="").grid(
 			row=0, column=0, sticky="w"
@@ -770,6 +802,255 @@ class AppWindow(ttk.Frame):
 			self.deposit_btn.configure(state=("normal" if has_ready else "disabled"))
 		except Exception:
 			pass
+
+	def _sync_export_enabled(self) -> None:
+		btn_browse = self._export_browse_btn
+		btn_export = self._export_btn
+		if btn_browse is None or btn_export is None:
+			return
+		export_dir = (self.export_var.get() or "").strip()
+		export_ok = bool(export_dir and os.path.isdir(export_dir))
+		try:
+			from services.ocr_runtime import is_profile_complete, load_ocr_profile
+
+			profile_ok = bool(is_profile_complete(load_ocr_profile()))
+		except Exception:
+			profile_ok = False
+		try:
+			has_checked = any(
+				r.checked
+				and r.checkbox_enabled
+				and r.status == RowStatus.Ready
+				and r.file_type in {FileType.TaxInvoice, FileType.Proforma}
+				for r in self.state.rows
+			)
+		except Exception:
+			has_checked = False
+		try:
+			btn_browse.configure(state="normal")
+		except Exception:
+			pass
+		try:
+			btn_export.configure(state=("disabled" if self._export_inflight else ("normal" if (export_ok and profile_ok and has_checked) else "disabled")))
+		except Exception:
+			pass
+
+	def _export_spinner_start(self) -> None:
+		canvas = self._export_spinner_canvas
+		if canvas is None:
+			return
+		self._export_inflight = True
+		self._export_spinner_frame = 0
+		self._export_spinner_order = [0, 1, 2, 5, 8, 7, 6, 3]
+		try:
+			canvas.grid()
+			canvas.tkraise()
+		except Exception:
+			pass
+		try:
+			btn = self._export_btn
+			if btn is not None:
+				btn.configure(state="disabled")
+		except Exception:
+			pass
+		try:
+			after_id = self._export_spinner_after
+			if after_id:
+				self.after_cancel(after_id)
+		except Exception:
+			pass
+		self._export_spinner_after = None
+
+		def _tick() -> None:
+			if not self._export_inflight:
+				return
+
+			ids = self._export_spinner_ids
+			order = self._export_spinner_order
+
+			# reset all squares to faint
+			for rid in ids:
+				canvas.itemconfigure(rid, fill="gray85", outline="gray85")
+
+			frame = self._export_spinner_frame % len(order)
+
+			# head + fading tail
+			shades = ["gray30", "gray50", "gray65", "gray75"]
+
+			for i, shade in enumerate(shades):
+				idx = order[(frame - i) % len(order)]
+				canvas.itemconfigure(ids[idx], fill=shade, outline=shade)
+
+			self._export_spinner_frame += 1
+			self._export_spinner_after = self.after(100, _tick)
+
+		_tick()
+
+	def _export_spinner_stop(self) -> None:
+		self._export_inflight = False
+		try:
+			after_id = self._export_spinner_after
+			if after_id:
+				self.after_cancel(after_id)
+		except Exception:
+			pass
+		self._export_spinner_after = None
+		canvas = self._export_spinner_canvas
+		if canvas is None:
+			return
+		try:
+			canvas.grid_remove()
+		except Exception:
+			pass
+		try:
+			self._sync_export_enabled()
+		except Exception:
+			pass
+
+	def _on_export_clicked(self) -> None:
+		try:
+			from services.ocr_runtime import is_profile_complete, load_ocr_profile
+
+			if not is_profile_complete(load_ocr_profile()):
+				messagebox.showwarning("Export", "Calibration profile is incomplete.")
+				return
+		except Exception:
+			messagebox.showwarning("Export", "Calibration profile is incomplete.")
+			return
+
+		export_dir = (self.export_var.get() or "").strip()
+		if not export_dir or not os.path.isdir(export_dir):
+			messagebox.showwarning("Export", "Export folder is missing or invalid.")
+			return
+
+		rows = [
+			r
+			for r in self.state.rows
+			if r.checked
+			and r.checkbox_enabled
+			and r.status == RowStatus.Ready
+			and r.file_type in {FileType.TaxInvoice, FileType.Proforma}
+			and r.source_path
+			and os.path.exists(r.source_path)
+		]
+		if not rows:
+			return
+
+		items = [(r.id, r.source_path, r.file_type, (r.display_name or r.file_name or "!")) for r in rows]
+		template_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "QLD Eftpos and Daily Cash (Template).xlsx"))
+
+		def _worker() -> None:
+			try:
+				import shutil
+				from collections import Counter
+				from openpyxl import load_workbook
+				from openpyxl.styles import PatternFill
+				from services.export_phase2 import extract_phase2_fields
+
+				results: list[tuple[str, str, str, str]] = []
+				date_counts: Counter[str] = Counter()
+				for row_id, src_path, ft, inv_no in items:
+					date_str, account_str, total_str = extract_phase2_fields(src_path, ft)
+					results.append((row_id, date_str, account_str, total_str))
+					if date_str and date_str != "!":
+						date_counts[date_str] += 1
+
+				common_date = "!!"
+				if date_counts:
+					common_date = date_counts.most_common(1)[0][0]
+
+				base_name = f"QLD Eftpos and Daily Cash ({common_date}).xlsx"
+				out_path = os.path.join(export_dir, base_name)
+				if os.path.exists(out_path):
+					i = 2
+					while True:
+						cand = os.path.join(export_dir, f"QLD Eftpos and Daily Cash ({common_date})__{i}.xlsx")
+						if not os.path.exists(cand):
+							out_path = cand
+							break
+						i += 1
+
+				if not os.path.exists(template_path):
+					raise FileNotFoundError(template_path)
+				shutil.copyfile(template_path, out_path)
+				wb = load_workbook(out_path)
+				ws = wb["Sheet1"] if "Sheet1" in wb.sheetnames else wb.active
+
+				header_row = 0
+				for r_i in range(1, min(int(ws.max_row or 0) + 1, 200)):
+					c1 = str(ws.cell(r_i, 1).value or "").strip().casefold()
+					c2 = str(ws.cell(r_i, 2).value or "").strip().casefold()
+					c3 = str(ws.cell(r_i, 3).value or "").strip().casefold()
+					c4 = str(ws.cell(r_i, 4).value or "").strip().casefold()
+					if c1 == "date" and c2 == "account number" and c3 == "invoice number" and c4 == "amount":
+						header_row = r_i
+						break
+				if header_row <= 0:
+					raise RuntimeError("Export header row not found")
+				first_data_row = header_row + 1
+
+				total_row = 0
+				for r_i in range(first_data_row, int(ws.max_row or 0) + 1):
+					if str(ws.cell(r_i, 3).value or "").strip().casefold() == "total":
+						total_row = r_i
+						break
+				if total_row <= 0 or total_row <= first_data_row:
+					raise RuntimeError("Export total row not found")
+
+				# Clear prior data A-E.
+				for r_i in range(first_data_row, total_row):
+					for c_i in range(1, 6):
+						cell = ws.cell(r_i, c_i)
+						cell.value = None
+
+				yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+				for idx, (row_id, date_str, account_str, total_str) in enumerate(results):
+					r_i = first_data_row + idx
+					if r_i >= total_row:
+						break
+					inv_no = next((inv for (rid, _p, _ft, inv) in items if rid == row_id), "!")
+					vals = [date_str, account_str, inv_no, total_str, ""]
+					for c_i, v in enumerate(vals, start=1):
+						cell = ws.cell(r_i, c_i)
+						if c_i == 4 and v != "!":
+							try:
+								cell.value = float(v)
+								cell.number_format = '"$"#,##0.00'
+							except Exception:
+								cell.value = v
+						else:
+							cell.value = v
+
+						if v == "!":
+							cell.fill = yellow
+
+				wb.save(out_path)
+
+				def _apply() -> None:
+					self._export_spinner_stop()
+					for row_id, date_str, account_str, total_str in results:
+						row = next((r for r in self.state.rows if r.id == row_id), None)
+						if row is None:
+							continue
+						row.date_str = date_str
+						row.account_str = account_str
+						row.total_str = total_str
+					self.files_grid.refresh()
+					self._persist_history_state()
+					try:
+						os.startfile(out_path)
+					except Exception:
+						messagebox.showerror("Export", "Unable to open exported file.")
+
+				self.after(0, _apply)
+			except Exception as e:
+				def _err() -> None:
+					self._export_spinner_stop()
+					messagebox.showerror("Export", f"Export failed: {e}")
+				self.after(0, _err)
+
+		self._export_spinner_start()
+		threading.Thread(target=_worker, name="ExportPhase2", daemon=True).start()
 
 	def _on_deposit_clicked(self) -> None:
 		dest = (self.state.dest_path or "").strip()
