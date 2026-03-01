@@ -208,9 +208,19 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 					chosen_token = next_line_nums[0]
 
 		if chosen_token is not None:
-			text_clean = str(chosen_token.get("text") or "").strip().replace("$", "").replace(",", "")
-			if "." in text_clean:
-				v = float(text_clean)
+			raw = str(chosen_token.get("text") or "").strip()
+			raw = raw.replace("$", "").replace(" ", "")
+			normalized = None
+			if re.match(r"^\d+,\d{2}$", raw):
+				normalized = raw.replace(",", ".")
+			elif re.match(r"^\d{1,3}(?:\.\d{3})+,\d{2}$", raw):
+				normalized = raw.replace(".", "").replace(",", ".")
+			elif re.match(r"^\d{1,3}(?:,\d{3})+(?:\.\d{2})$", raw):
+				normalized = raw.replace(",", "")
+			elif re.match(r"^\d+(\.\d{2})$", raw):
+				normalized = raw
+			if normalized is not None and re.match(r"^\d+(\.\d{2})$", normalized):
+				v = float(normalized)
 				total_str = f"{v:.2f}"
 	except Exception:
 		total_str = "!"
