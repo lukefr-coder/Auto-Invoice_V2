@@ -7,6 +7,7 @@ from services.ocr_runtime import (
 	is_profile_complete,
 	load_ocr_profile,
 	ocr_pixmap,
+	ocr_pixmap_tsv,
 	render_normalized_roi_to_pixmap,
 )
 
@@ -85,21 +86,132 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 		roi = section.get("total")
 		dpi = int((roi or {}).get("dpi") or 150)
 		pix = render_normalized_roi_to_pixmap(pdf_path, 0, dpi=dpi, roi=roi or {})
-		raw = ocr_pixmap(pix, psm=6, lang="eng")
-		t = (raw or "")
-		matches = re.findall(
-			r"(?<!\d)(\d{1,3}(?:,\d{3})*(?:\.\d{2})|\d+(?:\.\d{2})?)(?!\d)",
-			t,
-		)
-		values: list[float] = []
-		for s in matches:
+		raw_tsv = ocr_pixmap_tsv(pix, psm=6, lang="eng")
+		lines = (raw_tsv or "").splitlines()
+		tokens: list[dict] = []
+		for line in lines:
+			if not line or not line.strip():
+				continue
+			cols = line.split("\t")
+			if len(cols) < 12:
+				continue
+			if cols[0].strip().lower() == "level":
+				continue
+			text = cols[11]
+			if not text or not text.strip():
+				continue
 			try:
-				values.append(float(str(s).replace(",", "")))
+				token = {
+					"block_num": int(cols[2]),
+					"par_num": int(cols[3]),
+					"line_num": int(cols[4]),
+					"word_num": int(cols[5]),
+					"left": int(cols[6]),
+					"top": int(cols[7]),
+					"width": int(cols[8]),
+					"height": int(cols[9]),
+					"conf": float(cols[10]),
+					"text": text,
+				}
 			except Exception:
-				pass
-		if values:
-			v = max(values)
-			total_str = f"{v:.2f}"
+				continue
+			tokens.append(token)
+
+		anchors: list[dict] = []
+		for tok in tokens:
+			text_u = str(tok.get("text") or "").strip().upper()
+			if "TOTALEX" in text_u:
+				continue
+			if text_u != "TOTAL":
+				continue
+			line_key = (tok.get("block_num"), tok.get("par_num"), tok.get("line_num"))
+			wn = tok.get("word_num")
+			next_tok = None
+			for other in tokens:
+				if (other.get("block_num"), other.get("par_num"), other.get("line_num")) != line_key:
+					continue
+				try:
+					if int(other.get("word_num")) <= int(wn):
+						continue
+				except Exception:
+					continue
+				if next_tok is None or int(other.get("word_num")) < int(next_tok.get("word_num")):
+					next_tok = other
+			if next_tok is not None:
+				next_text_u = str(next_tok.get("text") or "").strip().upper()
+				if next_text_u == "EX":
+					continue
+			anchors.append(tok)
+
+		chosen_token = None
+		if len(anchors) == 1:
+			anchor = anchors[0]
+			anchor_line_key = (anchor.get("block_num"), anchor.get("par_num"), anchor.get("line_num"))
+			total_right = int(anchor.get("left")) + int(anchor.get("width"))
+			height = int(anchor.get("height"))
+			small_gap_px = max(5, int(height * 0.2))
+			candidates: list[dict] = []
+			for tok in tokens:
+				if (tok.get("block_num"), tok.get("par_num"), tok.get("line_num")) != anchor_line_key:
+					continue
+				cand_left = int(tok.get("left"))
+				if cand_left < total_right + small_gap_px:
+					continue
+				cand_text = str(tok.get("text") or "")
+				if not re.match(r"^[\$\s]*\d[\d,]*(?:\.\d{2})?\s*$", cand_text):
+					continue
+				try:
+					conf = float(tok.get("conf"))
+				except Exception:
+					continue
+				if conf < 50:
+					continue
+				candidates.append(tok)
+
+			if candidates:
+				sorted_cands = sorted(
+					candidates,
+					key=lambda d: (
+						float(d.get("conf")),
+						int(d.get("left")),
+					),
+					reverse=True,
+				)
+				if len(sorted_cands) >= 2:
+					c1 = sorted_cands[0]
+					c2 = sorted_cands[1]
+					if float(c1.get("conf")) == float(c2.get("conf")) and abs(int(c1.get("left")) - int(c2.get("left"))) <= 1:
+						sorted_cands = []
+				if sorted_cands:
+					chosen_token = sorted_cands[0]
+			else:
+				anchor_block_par = (anchor.get("block_num"), anchor.get("par_num"))
+				anchor_line_num = int(anchor.get("line_num"))
+				next_line_num = anchor_line_num + 1
+				next_line_nums: list[dict] = []
+				for tok in tokens:
+					if (tok.get("block_num"), tok.get("par_num")) != anchor_block_par:
+						continue
+					if int(tok.get("line_num")) != next_line_num:
+						continue
+					cand_text = str(tok.get("text") or "")
+					if not re.match(r"^[\$\s]*\d[\d,]*(?:\.\d{2})?\s*$", cand_text):
+						continue
+					try:
+						conf = float(tok.get("conf"))
+					except Exception:
+						continue
+					if conf < 50:
+						continue
+					next_line_nums.append(tok)
+				if len(next_line_nums) == 1:
+					chosen_token = next_line_nums[0]
+
+		if chosen_token is not None:
+			text_clean = str(chosen_token.get("text") or "").strip().replace("$", "").replace(",", "")
+			if "." in text_clean:
+				v = float(text_clean)
+				total_str = f"{v:.2f}"
 	except Exception:
 		total_str = "!"
 
