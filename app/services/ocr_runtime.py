@@ -7,6 +7,7 @@ import tempfile
 from typing import Any
 
 import fitz  # PyMuPDF
+from PIL import Image, ImageOps
 
 
 def load_ocr_profile() -> dict:
@@ -118,13 +119,29 @@ def ocr_pixmap(
 	lang: str = "eng",
 	whitelist: str | None = None,
 	timeout_s: float = 10.0,
+	preprocess: bool = True,
 ) -> str:
 	tmp_path = ""
 	try:
 		with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as f:
 			tmp_path = f.name
 		try:
-			pix.save(tmp_path)
+			if preprocess:
+				try:
+					width = pix.width
+					height = pix.height
+					samples = pix.samples
+					mode = "RGBA" if pix.alpha else "RGB"
+					img = Image.frombytes(mode, (width, height), samples)
+					if mode == "RGBA":
+						img = img.convert("RGB")
+					img = img.convert("L")
+					img = ImageOps.autocontrast(img, cutoff=2)
+					img.save(tmp_path, format="PNG", optimize=False)
+				except Exception:
+					pix.save(tmp_path)
+			else:
+				pix.save(tmp_path)
 		except Exception:
 			return ""
 
