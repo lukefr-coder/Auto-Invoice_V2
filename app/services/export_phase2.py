@@ -56,6 +56,14 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 		pix = render_normalized_roi_to_pixmap(pdf_path, 0, dpi=dpi, roi=roi or {})
 		raw = ocr_pixmap(pix, psm=6, lang="eng")
 		t = (raw or "").upper()
+
+		# --- Date OCR normalization (strict and minimal) ---
+		# Collapse split month tokens like "F EB" -> "FEB"
+		t = re.sub(r"\b([A-Z])\s+([A-Z]{2})\b", r"\1\2", t)
+
+		# Convert letter 'O' to digit '0' ONLY when part of a numeric token
+		t = re.sub(r"(?<=\d)O(?=\d)", "0", t)
+		t = re.sub(r"(?<=\b)O(?=\d)", "0", t)
 		m = re.search(r"\b(\d{1,2})\s*[-./\s]\s*([A-Z]{3})\s*[-./\s]\s*(\d{2,4})\b", t)
 		if m:
 			dd = int(m.group(1))
