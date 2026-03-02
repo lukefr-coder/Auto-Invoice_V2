@@ -64,6 +64,7 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 		# Convert letter 'O' to digit '0' ONLY when part of a numeric token
 		t = re.sub(r"(?<=\d)O(?=\d)", "0", t)
 		t = re.sub(r"(?<=\b)O(?=\d)", "0", t)
+		t = re.sub(r"\b0(\d{2})(?=[-./])", r"\1", t)
 		m = re.search(r"\b(\d{1,2})\s*[-./\s]\s*([A-Z]{3})\s*[-./\s]\s*(\d{2,4})\b", t)
 		if m:
 			dd = int(m.group(1))
