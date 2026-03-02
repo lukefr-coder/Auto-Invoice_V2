@@ -335,7 +335,7 @@ class CalibrationWindow(tk.Toplevel):
 			dpi_var = tk.StringVar(value="150")
 			self._dpi_vars[tab_key] = dpi_var
 
-		dpi = ttk.Combobox(row, textvariable=dpi_var, width=6, state="readonly", values=("100", "150", "200", "300"))
+		dpi = ttk.Combobox(row, textvariable=dpi_var, width=6, state="readonly", values=[150, 200, 250, 300, 350, 400, 450, 600])
 		dpi.grid(row=0, column=1, sticky="w")
 		dpi.bind("<<ComboboxSelected>>", lambda _e, k=tab_key: self._on_dpi_changed(k), add=True)
 
