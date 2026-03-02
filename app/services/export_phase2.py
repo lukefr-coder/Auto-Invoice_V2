@@ -138,6 +138,39 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 					"reason": reason,
 				},
 			)
+		if account_str != "!":
+			account_str_val = account_str
+			raw_val = raw
+			t_val = t
+			account_gate_ok = False
+			if isinstance(account_str_val, str) and len(account_str_val) == 5:
+				if account_str_val[:1].isalpha() and account_str_val[:1].upper() == account_str_val[:1]:
+					if account_str_val[1:].isdigit():
+						account_gate_ok = True
+			if (
+				account_gate_ok
+				and isinstance(account_str_val, str)
+				and account_str_val[:1] in {"I", "L"}
+				and (
+					"ACCOUNT" in (t_val or "")
+					or "ACCOUNT" in ((raw_val or "").upper())
+				)
+			):
+				_phase2_debug_log(
+					"PHASE2_ACCOUNT_SUSPECT_PASS",
+					{
+						"pdf_path": pdf_path,
+						"file_type": file_type,
+						"roi": roi,
+						"dpi": (roi or {}).get("dpi"),
+						"raw_ocr": raw_val,
+						"normalized_text": t_val,
+						"account_str": account_str_val,
+						"matches": matches,
+						"unique_candidates": list(cands),
+						"reason": "SUSPECT_LEADING_LETTER",
+					},
+				)
 	except Exception:
 		account_str = "!"
 		raw_val = locals().get("raw", None)
@@ -351,6 +384,59 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 					"reason": reason,
 				},
 			)
+		if total_str != "!":
+			anchors_val = locals().get("anchors", None)
+			sorted_cands_val = locals().get("sorted_cands", None)
+			next_line_nums_val = locals().get("next_line_nums", None)
+			chosen_token_val = locals().get("chosen_token", None)
+			normalized_val = locals().get("normalized", None)
+			candidates_val = locals().get("candidates", None)
+			if isinstance(anchors_val, list) and len(anchors_val) == 1:
+				if chosen_token_val is not None and (
+					isinstance(sorted_cands_val, list) or isinstance(candidates_val, list)
+				):
+					suspect_reason = None
+					try:
+						chosen_conf = float((chosen_token_val or {}).get("conf"))
+					except Exception:
+						chosen_conf = None
+					if isinstance(chosen_conf, (int, float)) and chosen_conf < 70:
+						suspect_reason = "LOW_CONFIDENCE_CHOSEN"
+					elif isinstance(sorted_cands_val, list) and len(sorted_cands_val) >= 2:
+						try:
+							top1_conf = float((sorted_cands_val[0] or {}).get("conf"))
+							top2_conf = float((sorted_cands_val[1] or {}).get("conf"))
+						except Exception:
+							top1_conf = None
+							top2_conf = None
+						if (
+							isinstance(top1_conf, (int, float))
+							and isinstance(top2_conf, (int, float))
+							and top1_conf >= 50
+							and top2_conf >= 50
+							and (top1_conf - top2_conf) <= 5
+						):
+							suspect_reason = "CLOSE_SECOND_CANDIDATE"
+					elif isinstance(sorted_cands_val, list) and len(sorted_cands_val) >= 3:
+						suspect_reason = "MULTI_AMOUNT_TOKENS_SAME_LINE"
+					if suspect_reason is not None:
+						_phase2_debug_log(
+							"PHASE2_TOTAL_SUSPECT_PASS",
+							{
+								"pdf_path": pdf_path,
+								"file_type": file_type,
+								"roi": roi,
+								"dpi": (roi or {}).get("dpi"),
+								"total_str": total_str,
+								"anchors_found": len(anchors_val),
+								"anchors": anchors_val,
+								"chosen_token": chosen_token_val,
+								"same_line_candidates": sorted_cands_val,
+								"next_line_candidates": next_line_nums_val,
+								"normalized_value": normalized_val,
+								"reason": suspect_reason,
+							},
+						)
 	except Exception:
 		total_str = "!"
 		roi_val = locals().get("roi", section.get("total"))
