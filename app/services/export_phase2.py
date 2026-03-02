@@ -12,6 +12,20 @@ from services.ocr_runtime import (
 )
 
 
+def _phase2_debug_log(tag: str, payload: dict):
+	try:
+		import json, datetime, os
+
+		log_path = os.path.join(os.getcwd(), "_phase2_debug_log.txt")
+		with open(log_path, "a", encoding="utf-8") as f:
+			f.write("\n" + "=" * 100 + "\n")
+			f.write(f"{datetime.datetime.now().isoformat()} | {tag}\n")
+			f.write(json.dumps(payload, indent=2, ensure_ascii=False))
+			f.write("\n")
+	except Exception:
+		pass
+
+
 _MONTHS: dict[str, int] = {
 	"JAN": 1,
 	"FEB": 2,
@@ -101,8 +115,58 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 		cands: set[str] = {m for m in matches if m}
 		if len(cands) == 1:
 			account_str = next(iter(cands))
+		if account_str == "!":
+			reason = "UNKNOWN_ACCOUNT_FAIL"
+			if not raw or raw.strip() == "":
+				reason = "EMPTY_OCR"
+			elif len(matches) == 0:
+				reason = "NO_REGEX_MATCH"
+			elif len(cands) > 1:
+				reason = "MULTIPLE_REGEX_MATCH"
+			_phase2_debug_log(
+				"PHASE2_ACCOUNT_FAIL",
+				{
+					"pdf_path": pdf_path,
+					"file_type": file_type,
+					"roi": roi,
+					"dpi": (roi or {}).get("dpi"),
+					"raw_ocr": raw,
+					"normalized_text": t,
+					"regex_matches": matches,
+					"unique_candidates": list(cands),
+					"candidate_count": len(cands),
+					"reason": reason,
+				},
+			)
 	except Exception:
 		account_str = "!"
+		raw_val = locals().get("raw", None)
+		roi_val = locals().get("roi", section.get("account_no"))
+		t_val = locals().get("t", "")
+		matches_val = locals().get("matches", [])
+		cands_val = locals().get("cands", set())
+		reason = "UNKNOWN_ACCOUNT_FAIL"
+		if not raw_val or str(raw_val).strip() == "":
+			reason = "EMPTY_OCR"
+		elif len(matches_val) == 0:
+			reason = "NO_REGEX_MATCH"
+		elif len(cands_val) > 1:
+			reason = "MULTIPLE_REGEX_MATCH"
+		_phase2_debug_log(
+			"PHASE2_ACCOUNT_FAIL",
+			{
+				"pdf_path": pdf_path,
+				"file_type": file_type,
+				"roi": roi_val,
+				"dpi": (roi_val or {}).get("dpi") if isinstance(roi_val, dict) or roi_val is None else None,
+				"raw_ocr": raw_val,
+				"normalized_text": t_val,
+				"regex_matches": matches_val,
+				"unique_candidates": list(cands_val),
+				"candidate_count": len(cands_val),
+				"reason": reason,
+			},
+		)
 
 	# Total
 	try:
@@ -110,6 +174,9 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 		dpi = int((roi or {}).get("dpi") or 150)
 		pix = render_normalized_roi_to_pixmap(pdf_path, 0, dpi=dpi, roi=roi or {})
 		raw_tsv = ocr_pixmap_tsv(pix, psm=6, lang="eng")
+		sorted_cands = None
+		next_line_nums = None
+		normalized = None
 		lines = (raw_tsv or "").splitlines()
 		tokens: list[dict] = []
 		for line in lines:
@@ -245,7 +312,85 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 			if normalized is not None and re.match(r"^\d+(\.\d{2})$", normalized):
 				v = float(normalized)
 				total_str = f"{v:.2f}"
+		if total_str == "!":
+			anchors_val = locals().get("anchors", None)
+			sorted_cands_val = locals().get("sorted_cands", None)
+			next_line_nums_val = locals().get("next_line_nums", None)
+			chosen_token_val = locals().get("chosen_token", None)
+			normalized_val = locals().get("normalized", None)
+			candidates_val = locals().get("candidates", None)
+			reason = "UNKNOWN_TOTAL_FAIL"
+			if not isinstance(anchors_val, list) or len(anchors_val) != 1:
+				reason = "NO_UNIQUE_ANCHOR"
+			elif chosen_token_val is not None:
+				if normalized_val is None or not re.match(r"^\d+(\.\d{2})$", str(normalized_val)):
+					reason = "NORMALIZATION_REJECTED"
+			else:
+				if isinstance(sorted_cands_val, list) and len(sorted_cands_val) == 0 and isinstance(candidates_val, list) and len(candidates_val) > 0:
+					reason = "AMBIGUOUS_SAME_LINE_TIE"
+				elif isinstance(candidates_val, list) and len(candidates_val) > 0:
+					reason = "NO_VALID_SAME_LINE_CANDIDATE"
+				else:
+					if not isinstance(next_line_nums_val, list) or len(next_line_nums_val) == 0:
+						reason = "NO_VALID_CANDIDATE"
+					else:
+						reason = "NO_VALID_NEXT_LINE_CANDIDATE"
+			_phase2_debug_log(
+				"PHASE2_TOTAL_FAIL",
+				{
+					"pdf_path": pdf_path,
+					"file_type": file_type,
+					"roi": roi,
+					"dpi": (roi or {}).get("dpi"),
+					"anchors_found": len(anchors_val) if isinstance(anchors_val, list) else None,
+					"anchors": anchors_val if isinstance(anchors_val, list) else None,
+					"same_line_candidates": sorted_cands_val,
+					"next_line_candidates": next_line_nums_val,
+					"chosen_token": chosen_token_val,
+					"normalized_value": normalized_val,
+					"reason": reason,
+				},
+			)
 	except Exception:
 		total_str = "!"
+		roi_val = locals().get("roi", section.get("total"))
+		anchors_val = locals().get("anchors", None)
+		sorted_cands_val = locals().get("sorted_cands", None)
+		next_line_nums_val = locals().get("next_line_nums", None)
+		chosen_token_val = locals().get("chosen_token", None)
+		normalized_val = locals().get("normalized", None)
+		candidates_val = locals().get("candidates", None)
+		reason = "UNKNOWN_TOTAL_FAIL"
+		if not isinstance(anchors_val, list) or len(anchors_val) != 1:
+			reason = "NO_UNIQUE_ANCHOR"
+		elif chosen_token_val is not None:
+			if normalized_val is None or not re.match(r"^\d+(\.\d{2})$", str(normalized_val)):
+				reason = "NORMALIZATION_REJECTED"
+		else:
+			if isinstance(sorted_cands_val, list) and len(sorted_cands_val) == 0 and isinstance(candidates_val, list) and len(candidates_val) > 0:
+				reason = "AMBIGUOUS_SAME_LINE_TIE"
+			elif isinstance(candidates_val, list) and len(candidates_val) > 0:
+				reason = "NO_VALID_SAME_LINE_CANDIDATE"
+			else:
+				if not isinstance(next_line_nums_val, list) or len(next_line_nums_val) == 0:
+					reason = "NO_VALID_CANDIDATE"
+				else:
+					reason = "NO_VALID_NEXT_LINE_CANDIDATE"
+		_phase2_debug_log(
+			"PHASE2_TOTAL_FAIL",
+			{
+				"pdf_path": pdf_path,
+				"file_type": file_type,
+				"roi": roi_val,
+				"dpi": (roi_val or {}).get("dpi") if isinstance(roi_val, dict) or roi_val is None else None,
+				"anchors_found": len(anchors_val) if isinstance(anchors_val, list) else None,
+				"anchors": anchors_val if isinstance(anchors_val, list) else None,
+				"same_line_candidates": sorted_cands_val,
+				"next_line_candidates": next_line_nums_val,
+				"chosen_token": chosen_token_val,
+				"normalized_value": normalized_val,
+				"reason": reason,
+			},
+		)
 
 	return (date_str, account_str, total_str)
