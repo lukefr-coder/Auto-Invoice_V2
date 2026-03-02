@@ -88,7 +88,14 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 		t = re.sub(r"(?<=\b[A-Z]\d)O(?=\d)", "0", t)
 		t = re.sub(r"(?<=\d)[IL](?=\d)", "1", t)
 		t = re.sub(r"(?<=\d)[IL](?=\b)", "1", t)
+		t = re.sub(r"(?<=\d)O(?=\b)", "0", t)
+		t = re.sub(
+			r"\b[A-Z][0-9OIL]{4}\b",
+			lambda m: m.group(0).replace("O", "0").replace("I", "1").replace("L", "1"),
+			t,
+		)
 		if "ACCOUNT" in t:
+			t = re.sub(r"\b1(\d{4})\b", r"I\1", t)
 			t = re.sub(r"(?<![A-Z0-9])\$(?=\d{4}\b)", "S", t)
 		matches = re.findall(r"\b[A-Z][0-9]{4}\b", t)
 		cands: set[str] = {m for m in matches if m}
