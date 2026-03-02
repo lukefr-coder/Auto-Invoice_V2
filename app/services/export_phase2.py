@@ -83,6 +83,13 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 		pix = render_normalized_roi_to_pixmap(pdf_path, 0, dpi=dpi, roi=roi or {})
 		raw = ocr_pixmap(pix, psm=6, lang="eng")
 		t = (raw or "").upper()
+		t = re.sub(r"\b([A-Z])\s+(\d{4})\b", r"\1\2", t)
+		t = re.sub(r"(?<=\d)O(?=\d)", "0", t)
+		t = re.sub(r"(?<=\b[A-Z]\d)O(?=\d)", "0", t)
+		t = re.sub(r"(?<=\d)[IL](?=\d)", "1", t)
+		t = re.sub(r"(?<=\d)[IL](?=\b)", "1", t)
+		if "ACCOUNT" in t:
+			t = re.sub(r"(?<![A-Z0-9])\$(?=\d{4}\b)", "S", t)
 		matches = re.findall(r"\b[A-Z][0-9]{4}\b", t)
 		cands: set[str] = {m for m in matches if m}
 		if len(cands) == 1:
