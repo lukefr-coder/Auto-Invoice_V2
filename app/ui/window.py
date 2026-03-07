@@ -237,6 +237,20 @@ class AppWindow(ttk.Frame):
 				enforce_display_name_group_status(self.state, canon)
 		return changed
 
+	def _seed_known_paths_from_restored_rows(self) -> None:
+		source_root = (self.state.source_path or "").strip()
+		source_root_norm = _norm(source_root) if source_root else ""
+		for row in getattr(self.state, "rows", []) or []:
+			src = (getattr(row, "source_path", "") or "").strip()
+			if not src:
+				continue
+			norm = _norm(src)
+			if not norm:
+				continue
+			if source_root_norm and norm != source_root_norm and not norm.startswith(source_root_norm + os.sep):
+				continue
+			self.state.known_paths.add(norm)
+
 	def _restore_history_state(self) -> None:
 		try:
 			data = persistence.load_history_state()
@@ -271,10 +285,13 @@ class AppWindow(ttk.Frame):
 		self.state.rows = rows
 		self.state.known_fingerprints = known
 		self.state.next_row_seq = max(1, next_row_seq)
+		self._seed_known_paths_from_restored_rows()
 
 		changed = False
 		changed = self._cleanup_missing_sources_once() or changed
 		changed = self._prune_history_rows_if_needed() or changed
+		self.state.known_paths.clear()
+		self._seed_known_paths_from_restored_rows()
 		if changed:
 			self._persist_history_state()
 
@@ -397,6 +414,7 @@ class AppWindow(ttk.Frame):
 			self._watcher = None
 
 		reset_watch_state(self.state)
+		self._seed_known_paths_from_restored_rows()
 
 		if not self.state.source_path:
 			return
