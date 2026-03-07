@@ -1241,11 +1241,14 @@ class AppWindow(ttk.Frame):
 		result = self._show_manual_input_dialog(
 			initial_doc_no=row.file_name,
 			initial_file_type=row.file_type,
+			initial_date_str=row.date_str,
+			initial_account_str=row.account_str,
+			initial_total_str=row.total_str,
 			pdf_path=row.source_path,
 		)
 		if result is None:
 			return
-		doc_no, file_type = result
+		doc_no, file_type, date_str, account_str, total_str = result
 		doc_no = _sanitize_windows_filename_stem(doc_no)
 		if not doc_no or doc_no == "!":
 			messagebox.showwarning("Manual Input", "Document number is invalid.")
@@ -1255,6 +1258,9 @@ class AppWindow(ttk.Frame):
 		if new_display_name == old_display_name:
 			old_status = row.status
 			row.file_type = file_type
+			row.date_str = date_str
+			row.account_str = account_str
+			row.total_str = total_str
 			row.status = old_status
 			self.files_grid.refresh()
 			self.status_bar.set_success("Saved")
@@ -1286,6 +1292,9 @@ class AppWindow(ttk.Frame):
 			doc_no=doc_no,
 			file_type=file_type,
 			new_source_path=renamed_norm,
+			date_str=date_str,
+			account_str=account_str,
+			total_str=total_str,
 		)
 		if ok:
 			self.state.known_paths.discard(old_norm)
@@ -2092,8 +2101,11 @@ class AppWindow(ttk.Frame):
 		*,
 		initial_doc_no: str,
 		initial_file_type: FileType,
+		initial_date_str: str,
+		initial_account_str: str,
+		initial_total_str: str,
 		pdf_path: str,
-	) -> tuple[str, FileType] | None:
+	) -> tuple[str, FileType, str, str, str] | None:
 		win = tk.Toplevel(self)
 		win.title("Manual Input")
 		win.resizable(True, True)
@@ -2143,10 +2155,37 @@ class AppWindow(ttk.Frame):
 		type_combo = ttk.Combobox(left, textvariable=type_var, values=type_values, state="readonly", width=34)
 		type_combo.grid(row=3, column=0, sticky="ew", pady=(0, 10))
 
-		btns = ttk.Frame(left)
-		btns.grid(row=4, column=0, sticky="e")
+		ttk.Label(left, text="Date").grid(row=4, column=0, sticky="w")
+		date_var = tk.StringVar(value=(initial_date_str or ""))
+		date_entry = ttk.Entry(left, textvariable=date_var, width=36)
+		date_entry.grid(row=5, column=0, sticky="ew", pady=(0, 10))
 
-		result: tuple[str, FileType] | None = None
+		ttk.Label(left, text="Account Number").grid(row=6, column=0, sticky="w")
+		account_var = tk.StringVar(value=(initial_account_str or ""))
+		account_entry = ttk.Entry(left, textvariable=account_var, width=36)
+		account_entry.grid(row=7, column=0, sticky="ew", pady=(0, 10))
+
+		ttk.Label(left, text="Total").grid(row=8, column=0, sticky="w")
+		total_var = tk.StringVar(value=(initial_total_str or ""))
+		total_entry = ttk.Entry(left, textvariable=total_var, width=36)
+		total_entry.grid(row=9, column=0, sticky="ew", pady=(0, 10))
+
+		btns = ttk.Frame(left)
+		btns.grid(row=10, column=0, sticky="e")
+
+		result: tuple[str, FileType, str, str, str] | None = None
+
+		def _phase2_fields_enabled() -> bool:
+			ft_str = (type_var.get() or "").strip()
+			return ft_str in {FileType.TaxInvoice.value, FileType.Proforma.value}
+
+		def _update_phase2_field_state() -> None:
+			state = "normal" if _phase2_fields_enabled() else "disabled"
+			for entry in (date_entry, account_entry, total_entry):
+				try:
+					entry.configure(state=state)
+				except Exception:
+					pass
 
 		def _doc_no_is_valid() -> bool:
 			stem = _sanitize_windows_filename_stem((doc_var.get() or "").strip())
@@ -2166,6 +2205,48 @@ class AppWindow(ttk.Frame):
 			)
 			return re.fullmatch(base_pat, base) is not None
 
+		def _normalize_date_value(raw: str) -> str | None:
+			value = (raw or "").strip()
+			if not value:
+				return ""
+			parts = re.split(r"[./-]", value)
+			if len(parts) != 3 or any((not p.isdigit()) for p in parts):
+				return None
+			day_s, month_s, year_s = parts
+			if len(year_s) not in {2, 4}:
+				return None
+			try:
+				day = int(day_s)
+				month = int(month_s)
+				year = int(year_s)
+				if len(year_s) == 2:
+					year += 2000
+				_ = time.strptime(f"{day:02d}.{month:02d}.{year:04d}", "%d.%m.%Y")
+			except Exception:
+				return None
+			return f"{day:02d}.{month:02d}.{year % 100:02d}"
+
+		def _normalize_account_value(raw: str) -> str | None:
+			value = (raw or "").strip()
+			if not value:
+				return ""
+			m = re.fullmatch(r"([A-Za-z])(\d{4})", value)
+			if m is None:
+				return None
+			return f"{m.group(1).upper()}{m.group(2)}"
+
+		def _normalize_total_value(raw: str) -> str | None:
+			value = (raw or "").strip()
+			if not value:
+				return ""
+			if value.startswith("$"):
+				value = value[1:].strip()
+			if re.fullmatch(r"\d+", value):
+				return f"${value}.00"
+			if re.fullmatch(r"\d+\.\d{2}", value):
+				return f"${value}"
+			return None
+
 		def on_ok() -> None:
 			nonlocal result
 			doc_no = (doc_var.get() or "").strip()
@@ -2180,7 +2261,32 @@ class AppWindow(ttk.Frame):
 				messagebox.showwarning("Manual Input", "Please select a file type.")
 				return
 			ft = next((t for t in FileType if t.value == ft_str), FileType.Unknown)
-			result = (doc_no, ft)
+			date_value = (date_var.get() or "").strip()
+			account_value = (account_var.get() or "").strip()
+			total_value = (total_var.get() or "").strip()
+			if _phase2_fields_enabled():
+				normalized_date = _normalize_date_value(date_value)
+				if normalized_date is None:
+					messagebox.showwarning("Manual Input", "Date must be blank or in DD.MM.YY format.")
+					return
+				normalized_account = _normalize_account_value(account_value)
+				if normalized_account is None:
+					messagebox.showwarning("Manual Input", "Account Number must be blank or in A1234 format.")
+					return
+				normalized_total = _normalize_total_value(total_value)
+				if normalized_total is None:
+					messagebox.showwarning("Manual Input", "Total must be blank or in $123.45 format.")
+					return
+				date_value = normalized_date
+				account_value = normalized_account
+				total_value = normalized_total
+			result = (
+				doc_no,
+				ft,
+				date_value,
+				account_value,
+				total_value,
+			)
 			win.destroy()
 
 		def on_cancel() -> None:
@@ -2195,6 +2301,7 @@ class AppWindow(ttk.Frame):
 			ft_str = (type_var.get() or "").strip()
 			valid_doc = bool(doc_no) and _doc_no_is_valid()
 			valid_type = (ft_str != FileType.Unknown.value)
+			_update_phase2_field_state()
 			try:
 				ok_btn.configure(state=("normal" if (valid_doc and valid_type) else "disabled"))
 			except Exception:
@@ -2215,6 +2322,9 @@ class AppWindow(ttk.Frame):
 			on_ok()
 			return "break"
 		doc_entry.bind("<Return>", _on_return)
+		date_entry.bind("<Return>", _on_return)
+		account_entry.bind("<Return>", _on_return)
+		total_entry.bind("<Return>", _on_return)
 		try:
 			doc_entry.focus_set()
 		except Exception:

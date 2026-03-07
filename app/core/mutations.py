@@ -59,10 +59,14 @@ def resolve_review_row_manual(
 	doc_no: str,
 	file_type: FileType,
 	new_source_path: str,
+	date_str: str | None = None,
+	account_str: str | None = None,
+	total_str: str | None = None,
 ) -> bool:
 	"""Apply manual inputs to an existing row.
 
-	Updates display_name/file_name/file_type/status/source_path only.
+	Updates display_name/file_name/file_type/status/source_path and optional
+	Phase 2 display fields.
 	Must be called on the UI thread.
 	"""
 	for row in state.rows:
@@ -98,6 +102,12 @@ def resolve_review_row_manual(
 			row.checkbox_enabled = False
 			row.checked = False
 		row.source_path = new_source_path or row.source_path
+		if date_str is not None:
+			row.date_str = date_str.strip()
+		if account_str is not None:
+			row.account_str = account_str.strip()
+		if total_str is not None:
+			row.total_str = total_str.strip()
 		return True
 	return False
 
