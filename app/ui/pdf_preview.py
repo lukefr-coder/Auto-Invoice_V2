@@ -140,10 +140,7 @@ class PdfPage1Preview(ttk.Frame):
 			pass
 
 	def _on_canvas_enter(self, _event: tk.Event) -> None:
-		try:
-			self._canvas.focus_set()
-		except Exception:
-			pass
+		return None
 
 	def _clamp_zoom_factor(self, z: float) -> float:
 		try:
@@ -256,10 +253,6 @@ class PdfPage1Preview(ttk.Frame):
 		self._zoom_at(-1, int(getattr(event, "x", 0)), int(getattr(event, "y", 0)))
 
 	def _on_button_press_1(self, event: tk.Event) -> None:
-		try:
-			self._canvas.focus_set()
-		except Exception:
-			pass
 		if float(self._zoom_factor) <= 1.0:
 			self._drag_active = False
 			return
