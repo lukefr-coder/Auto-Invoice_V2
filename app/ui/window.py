@@ -1271,7 +1271,8 @@ class AppWindow(ttk.Frame):
 			return
 
 		target = _choose_collision_free_path(dir_path, doc_no, ext=".pdf")
-		renamed_norm = _attempt_rename(_norm(src_path), target)
+		old_norm = _norm(src_path)
+		renamed_norm = _attempt_rename(old_norm, target)
 		if renamed_norm is None:
 			messagebox.showerror(
 				"Manual Input",
@@ -1287,6 +1288,9 @@ class AppWindow(ttk.Frame):
 			new_source_path=renamed_norm,
 		)
 		if ok:
+			self.state.known_paths.discard(old_norm)
+			self.state.pending_paths.discard(old_norm)
+			self.state.known_paths.add(renamed_norm)
 			self.files_grid.refresh()
 			self.status_bar.set_success("Saved")
 			self._persist_history_state()

@@ -230,7 +230,14 @@ def add_row_from_phase1_result(state: AppState, *, res: Phase1Result) -> bool:
 			if rn:
 				for r in state.rows:
 					if (getattr(r, "fingerprint_sha256", "") or "").strip().lower() == fp:
-						r.source_path = rn
+						is_unresolved_review = (
+							r.status == RowStatus.Review
+							and (r.display_name or "!") == "!"
+							and (r.file_name or "!") == "!"
+							and r.file_type == FileType.Unknown
+						)
+						if not r.source_path or is_unresolved_review:
+							r.source_path = rn
 						break
 		state.phase1_completed_paths.add(orig_norm)
 		return False
