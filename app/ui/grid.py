@@ -270,13 +270,16 @@ class FilesGrid(ttk.Frame):
 		checkbox_text = ("☑" if row.checked else "☐") if show_checkbox else ""
 		doc_type = _ENUM_TO_DOC_TYPE.get(row.file_type, row.file_type.value)
 		display = row.display_name if (row.display_name and row.display_name != "!") else row.file_name
+		total_display = row.total_str
+		if total_display not in {"", "!"} and not total_display.startswith("$"):
+			total_display = f"${total_display}"
 		return (
 			checkbox_text,
 			display,
 			doc_type,
 			row.date_str,
 			row.account_str,
-			row.total_str,
+			total_display,
 			row.status.value,
 		)
 
