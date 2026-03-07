@@ -9,7 +9,6 @@ from core.mutations import (
 	apply_filters,
 	set_status_filter,
 	set_type_filter,
-	toggle_all_eligible,
 	toggle_row_checked,
 )
 from core.row_model import FileType, RowModel, RowStatus
@@ -266,7 +265,7 @@ class FilesGrid(ttk.Frame):
 				self.on_visible_count_changed()
 
 	def _row_values(self, row: RowModel) -> tuple[str, str, str, str, str, str, str]:
-		show_checkbox = row.file_type in {FileType.TaxInvoice, FileType.Proforma}
+		show_checkbox = self._checkbox_visible_for_row(row)
 		checkbox_text = ("☑" if row.checked else "☐") if show_checkbox else ""
 		doc_type = _ENUM_TO_DOC_TYPE.get(row.file_type, row.file_type.value)
 		display = row.display_name if (row.display_name and row.display_name != "!") else row.file_name
@@ -283,12 +282,20 @@ class FilesGrid(ttk.Frame):
 			row.status.value,
 		)
 
+	def _checkbox_visible_for_row(self, row: RowModel) -> bool:
+		return (
+			row.status == RowStatus.Ready
+			and row.file_type in {FileType.TaxInvoice, FileType.Proforma}
+			and row.checkbox_enabled
+		)
+
 	def _toggle_header_checkbox(self) -> None:
-		eligible_rows = [r for r in self._state.rows if r.checkbox_enabled]
+		eligible_rows = [r for r in self._state.rows if self._checkbox_visible_for_row(r)]
 		if not eligible_rows:
 			return
 		new_value = not all(r.checked for r in eligible_rows)
-		toggle_all_eligible(self._state, new_value)
+		for row in eligible_rows:
+			row.checked = new_value
 		self.refresh()
 
 	def _on_mouse_down(self, event: tk.Event) -> str | None:
@@ -308,7 +315,7 @@ class FilesGrid(ttk.Frame):
 		row = next((r for r in self._state.rows if r.id == row_id), None)
 		if row is None:
 			return None
-		if not row.checkbox_enabled:
+		if not self._checkbox_visible_for_row(row):
 			return None
 
 		new_value = not row.checked
@@ -341,7 +348,7 @@ class FilesGrid(ttk.Frame):
 			type_header = TYPE_SHORTHAND.get(type_str, type_str)
 		self.tree.heading("type", text=f"Type ({type_header})", command=self._cycle_type_filter)
 
-		eligible_rows = [r for r in self._state.rows if r.checkbox_enabled]
+		eligible_rows = [r for r in self._state.rows if self._checkbox_visible_for_row(r)]
 		glyph = "☐"
 		if eligible_rows and all(r.checked for r in eligible_rows):
 			glyph = "☑"
