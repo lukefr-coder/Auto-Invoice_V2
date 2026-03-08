@@ -978,6 +978,7 @@ class AppWindow(ttk.Frame):
 			return
 
 		items = [(r.id, r.source_path, r.file_type, (r.display_name or r.file_name or "!")) for r in rows]
+		export_row_ids = {row_id for row_id, _src_path, _ft, _inv_no in items}
 		template_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "assets", "QLD Eftpos and Daily Cash (Template).xlsx"))
 
 		def _worker() -> None:
@@ -1076,6 +1077,9 @@ class AppWindow(ttk.Frame):
 						row.date_str = date_str
 						row.account_str = account_str
 						row.total_str = total_str
+					for row in self.state.rows:
+						if row.id in export_row_ids:
+							row.checked = False
 					self.files_grid.refresh()
 					self._persist_history_state()
 					try:
