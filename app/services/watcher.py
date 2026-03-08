@@ -172,6 +172,8 @@ class _Phase1Parsed:
 
 
 _INVALID_WIN_CHARS_RE = re.compile(r'[<>:"/\\|?*]')
+_CREDIT_STEM_RE = re.compile(r"^\d{6}[A-Z]?$")
+_CREDIT_DOC_NO_RE = re.compile(r"^(\d{6}[A-Z]?)\(([1-9]\d*)\)$")
 
 
 def _sanitize_windows_filename_stem(stem: str) -> str:
@@ -179,6 +181,78 @@ def _sanitize_windows_filename_stem(stem: str) -> str:
 	stem = _INVALID_WIN_CHARS_RE.sub("_", stem)
 	stem = stem.rstrip(" .")
 	return stem
+
+
+def _parse_credit_stem(value: str) -> str | None:
+	stem = (value or "").strip().upper()
+	if _CREDIT_STEM_RE.fullmatch(stem) is None:
+		return None
+	return stem
+
+
+def _parse_credit_doc_no(value: str) -> tuple[str, int] | None:
+	text = (value or "").strip().upper()
+	m = _CREDIT_DOC_NO_RE.fullmatch(text)
+	if m is None:
+		return None
+	try:
+		suffix = int(m.group(2))
+	except Exception:
+		return None
+	if suffix < 1:
+		return None
+	return m.group(1), suffix
+
+
+def _parse_credit_stem_candidate(value: str) -> str | None:
+	parsed = _parse_credit_doc_no(value)
+	if parsed is not None:
+		return parsed[0]
+	return _parse_credit_stem(value)
+
+
+def _build_credit_doc_no(stem: str, suffix: int) -> str | None:
+	norm_stem = _parse_credit_stem(stem)
+	try:
+		norm_suffix = int(suffix)
+	except Exception:
+		return None
+	if norm_stem is None or norm_suffix < 1:
+		return None
+	return f"{norm_stem}({norm_suffix})"
+
+
+def _row_field(row: object, name: str) -> object:
+	if isinstance(row, dict):
+		return row.get(name)
+	return getattr(row, name, None)
+
+
+def _credit_doc_no_from_row(row: object) -> str:
+	file_type = _row_field(row, "file_type")
+	if file_type != FileType.Credit and getattr(file_type, "value", None) != FileType.Credit.value:
+		return ""
+	for key in ("file_name", "display_name", "doc_no"):
+		value = _row_field(row, key)
+		if isinstance(value, str):
+			text = value.strip()
+			if text and text != "!":
+				return text
+	return ""
+
+
+def _suggest_next_credit_suffix(stem: str, rows: list[object] | tuple[object, ...] | None) -> int:
+	norm_stem = _parse_credit_stem(stem)
+	if norm_stem is None:
+		return 1
+	highest = 0
+	for row in rows or ():
+		parsed = _parse_credit_doc_no(_credit_doc_no_from_row(row))
+		if parsed is None or parsed[0] != norm_stem:
+			continue
+		if parsed[1] > highest:
+			highest = parsed[1]
+	return highest + 1 if highest >= 1 else 1
 
 
 def _sha256_hex(path: str) -> str:
@@ -216,7 +290,7 @@ def _extract_doc_no_from_text(text: str) -> str:
 	if not text:
 		return "!"
 	t = (text or "").upper()
-	pat = re.compile(r"(?<![A-Z0-9])(\d{6}(?:[A-Z])?(?:\([1-9]\))?)(?![A-Z0-9])")
+	pat = re.compile(r"(?<![A-Z0-9])(\d{6}(?:[A-Z])?(?:\([1-9]\d*\))?)(?![A-Z0-9])")
 	matches = pat.findall(t)
 	cands: set[str] = {m for m in matches if m}
 	if len(cands) != 1:
@@ -327,6 +401,8 @@ class Phase1Processor:
 		self._results_by_key: dict[tuple[int, str], Phase1Result] = {}
 		self._seen_fingerprints: set[str] = set()
 		self._canonical_path_by_fp: dict[str, str] = {}
+		self._credit_doc_nos_lock = threading.Lock()
+		self._credit_doc_nos_by_stem: dict[str, set[int]] = {}
 
 	def start(self) -> None:
 		self._thread.start()
@@ -358,6 +434,33 @@ class Phase1Processor:
 			return
 		self._seen_fingerprints.discard(fp)
 		self._canonical_path_by_fp.pop(fp, None)
+
+	def set_credit_suffix_rows(self, rows: list[object] | tuple[object, ...] | None) -> None:
+		mapped: dict[str, set[int]] = {}
+		for row in rows or ():
+			parsed = _parse_credit_doc_no(_credit_doc_no_from_row(row))
+			if parsed is None:
+				continue
+			mapped.setdefault(parsed[0], set()).add(parsed[1])
+		with self._credit_doc_nos_lock:
+			self._credit_doc_nos_by_stem = mapped
+
+	def _suggest_credit_suffix(self, stem: str) -> int:
+		norm_stem = _parse_credit_stem(stem)
+		if norm_stem is None:
+			return 1
+		with self._credit_doc_nos_lock:
+			used = set(self._credit_doc_nos_by_stem.get(norm_stem, set()))
+		if not used:
+			return 1
+		return max(used) + 1
+
+	def _remember_credit_doc_no(self, doc_no: str) -> None:
+		parsed = _parse_credit_doc_no(doc_no)
+		if parsed is None:
+			return
+		with self._credit_doc_nos_lock:
+			self._credit_doc_nos_by_stem.setdefault(parsed[0], set()).add(parsed[1])
 
 	def take_result(self, batch_id: int, path: str) -> Phase1Result | None:
 		key = (batch_id, _norm(path))
@@ -535,6 +638,15 @@ class Phase1Processor:
 				parsed = _parse_phase1_from_pdf_page1(orig_norm)
 				doc_no = parsed.doc_no if parsed.doc_no else "!"
 				file_type = parsed.file_type if isinstance(parsed.file_type, FileType) else FileType.Unknown
+				if file_type == FileType.Credit and doc_no != "!":
+					credit_stem = _parse_credit_stem_candidate(doc_no)
+					if credit_stem is None:
+						doc_no = "!"
+						file_type = FileType.Unknown
+					else:
+						doc_no = _build_credit_doc_no(credit_stem, self._suggest_credit_suffix(credit_stem)) or "!"
+						if doc_no == "!":
+							file_type = FileType.Unknown
 
 				# Determine preferred target
 				if doc_no.lower().endswith(".pdf"):
@@ -570,6 +682,8 @@ class Phase1Processor:
 					renamed_norm = orig_norm
 					doc_no = "!"
 					file_type = FileType.Unknown
+				elif file_type == FileType.Credit and doc_no != "!":
+					self._remember_credit_doc_no(doc_no)
 
 				self._canonical_path_by_fp[fp] = _norm(renamed_norm or orig_norm)
 

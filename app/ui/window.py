@@ -26,9 +26,13 @@ from services.watcher import (
 	FolderWatcher,
 	Phase1Processor,
 	_attempt_rename,
+	_build_credit_doc_no,
 	_choose_collision_free_path,
 	_norm,
+	_parse_credit_doc_no,
+	_parse_credit_stem,
 	_sanitize_windows_filename_stem,
+	_suggest_next_credit_suffix,
 )
 from state import persistence
 from state.persistence import load_settings, save_settings
@@ -109,6 +113,7 @@ class AppWindow(ttk.Frame):
 		self._watcher: FolderWatcher | None = None
 		self._worker = Phase1Processor(self._worker_event_queue)
 		self._worker.start()
+		self._sync_worker_credit_suffix_rows()
 		self._batch_done_linger_until: float = 0.0
 		self._batch_done_linger_text: str = ""
 		self._restart_watcher_if_possible()
@@ -191,6 +196,15 @@ class AppWindow(ttk.Frame):
 		try:
 			self._prune_history_rows_if_needed()
 			persistence.save_history_state(self._history_dict_from_state())
+		except Exception:
+			pass
+
+	def _sync_worker_credit_suffix_rows(self) -> None:
+		worker = getattr(self, "_worker", None)
+		if worker is None:
+			return
+		try:
+			worker.set_credit_suffix_rows(list(getattr(self.state, "rows", []) or []))
 		except Exception:
 			pass
 
@@ -527,6 +541,8 @@ class AppWindow(ttk.Frame):
 			self.files_grid.refresh()
 			self._sync_file_count()
 			self._persist_history_state()
+
+		self._sync_worker_credit_suffix_rows()
 
 		# If the active batch just completed, linger the final status briefly.
 		if prev_batch is not None and self.state.active_batch is None and prev_batch.done_count >= prev_batch.total:
@@ -1249,6 +1265,12 @@ class AppWindow(ttk.Frame):
 		if result is None:
 			return
 		doc_no, file_type, date_str, account_str, total_str = result
+		if file_type == FileType.Credit:
+			parsed_credit = _parse_credit_doc_no(doc_no)
+			if parsed_credit is None:
+				messagebox.showwarning("Manual Input", "Document number is invalid.")
+				return
+			doc_no = _build_credit_doc_no(parsed_credit[0], parsed_credit[1]) or ""
 		doc_no = _sanitize_windows_filename_stem(doc_no)
 		if not doc_no or doc_no == "!":
 			messagebox.showwarning("Manual Input", "Document number is invalid.")
@@ -1265,6 +1287,7 @@ class AppWindow(ttk.Frame):
 			self.files_grid.refresh()
 			self.status_bar.set_success("Saved")
 			self._persist_history_state()
+			self._sync_worker_credit_suffix_rows()
 			return
 
 		src_path = row.source_path
@@ -1303,6 +1326,7 @@ class AppWindow(ttk.Frame):
 			self.files_grid.refresh()
 			self.status_bar.set_success("Saved")
 			self._persist_history_state()
+			self._sync_worker_credit_suffix_rows()
 
 	def _open_file_for_row(self, row_id: str) -> None:
 		row = next((r for r in self.state.rows if r.id == row_id), None)
@@ -2137,10 +2161,39 @@ class AppWindow(ttk.Frame):
 		preview.set_pdf_path(pdf_path)
 
 		ttk.Label(left, text="Document No").grid(row=0, column=0, sticky="w")
-		doc_var = tk.StringVar(value="" if initial_doc_no == "!" else (initial_doc_no or ""))
+		initial_doc_value = "" if initial_doc_no == "!" else (initial_doc_no or "")
+		initial_credit_parts = _parse_credit_doc_no(initial_doc_value)
+		initial_credit_stem = (
+			initial_credit_parts[0]
+			if initial_credit_parts is not None
+			else (_parse_credit_stem(initial_doc_value) or "")
+		)
+		initial_credit_suffix = (
+			str(initial_credit_parts[1])
+			if initial_credit_parts is not None
+			else str(_suggest_next_credit_suffix(initial_credit_stem, self.state.rows))
+		)
+		doc_input_frame = ttk.Frame(left)
+		doc_input_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+		doc_input_frame.columnconfigure(0, weight=1)
+
+		doc_var = tk.StringVar(value=initial_doc_value)
 		doc_var.trace_add("write", lambda *_: _upper_var(doc_var))
-		doc_entry = ttk.Entry(left, textvariable=doc_var, width=36)
-		doc_entry.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+		doc_entry = ttk.Entry(doc_input_frame, textvariable=doc_var, width=36)
+		doc_entry.grid(row=0, column=0, sticky="ew")
+
+		credit_stem_var = tk.StringVar(value=initial_credit_stem)
+		credit_stem_var.trace_add("write", lambda *_: _upper_var(credit_stem_var))
+		credit_suffix_var = tk.StringVar(value=initial_credit_suffix)
+		credit_doc_frame = ttk.Frame(doc_input_frame)
+		credit_doc_frame.columnconfigure(0, weight=1)
+		credit_stem_entry = ttk.Entry(credit_doc_frame, textvariable=credit_stem_var, width=24)
+		credit_stem_entry.grid(row=0, column=0, sticky="ew")
+		tk.Label(credit_doc_frame, text="(", foreground="gray50").grid(row=0, column=1, padx=(6, 0))
+		credit_suffix_entry = ttk.Entry(credit_doc_frame, textvariable=credit_suffix_var, width=4)
+		credit_suffix_entry.grid(row=0, column=2, padx=2)
+		tk.Label(credit_doc_frame, text=")", foreground="gray50").grid(row=0, column=3)
+		credit_doc_frame.grid(row=0, column=0, sticky="ew")
 
 		ttk.Label(left, text="File Type").grid(row=2, column=0, sticky="w")
 		type_values = [
@@ -2174,6 +2227,8 @@ class AppWindow(ttk.Frame):
 		btns.grid(row=10, column=0, sticky="e")
 
 		result: tuple[str, FileType, str, str, str] | None = None
+		_doc_editor_sync = {"active": False}
+		_prev_credit_visible = {"value": (type_var.get() or "").strip() == FileType.Credit.value}
 
 		def _phase2_fields_enabled() -> bool:
 			ft_str = (type_var.get() or "").strip()
@@ -2187,7 +2242,56 @@ class AppWindow(ttk.Frame):
 				except Exception:
 					pass
 
+		def _credit_fields_visible() -> bool:
+			return (type_var.get() or "").strip() == FileType.Credit.value
+
+		def _current_credit_doc_no() -> str:
+			stem = _parse_credit_stem((credit_stem_var.get() or "").strip())
+			if stem is None:
+				return ""
+			suffix_text = (credit_suffix_var.get() or "").strip()
+			if not suffix_text.isdigit():
+				return ""
+			return _build_credit_doc_no(stem, int(suffix_text)) or ""
+
+		def _sync_doc_values_for_type_toggle() -> None:
+			if _doc_editor_sync["active"]:
+				return
+			show_credit = _credit_fields_visible()
+			if show_credit == _prev_credit_visible["value"]:
+				return
+			_doc_editor_sync["active"] = True
+			try:
+				if show_credit:
+					normal_text = (doc_var.get() or "").strip()
+					if normal_text:
+						credit_stem_var.set(normal_text)
+				else:
+					credit_stem_text = (credit_stem_var.get() or "").strip()
+					if credit_stem_text:
+						doc_var.set(credit_stem_text)
+			finally:
+				_prev_credit_visible["value"] = show_credit
+				_doc_editor_sync["active"] = False
+
+		def _update_doc_field_state() -> None:
+			_sync_doc_values_for_type_toggle()
+			if _credit_fields_visible():
+				try:
+					doc_entry.grid_remove()
+				except Exception:
+					pass
+				credit_doc_frame.grid(row=0, column=0, sticky="ew")
+			else:
+				try:
+					credit_doc_frame.grid_remove()
+				except Exception:
+					pass
+				doc_entry.grid(row=0, column=0, sticky="ew")
+
 		def _doc_no_is_valid() -> bool:
+			if _credit_fields_visible():
+				return bool(_current_credit_doc_no())
 			stem = _sanitize_windows_filename_stem((doc_var.get() or "").strip())
 			stem = (stem or "").upper()
 			if (not stem) or stem == "!":
@@ -2249,7 +2353,7 @@ class AppWindow(ttk.Frame):
 
 		def on_ok() -> None:
 			nonlocal result
-			doc_no = (doc_var.get() or "").strip()
+			doc_no = _current_credit_doc_no() if _credit_fields_visible() else (doc_var.get() or "").strip()
 			if not doc_no:
 				messagebox.showwarning("Manual Input", "Please enter a document number.")
 				return
@@ -2297,7 +2401,8 @@ class AppWindow(ttk.Frame):
 		ok_btn.grid(row=0, column=1)
 
 		def update_ok_enabled() -> None:
-			doc_no = (doc_var.get() or "").strip()
+			_update_doc_field_state()
+			doc_no = _current_credit_doc_no() if _credit_fields_visible() else (doc_var.get() or "").strip()
 			ft_str = (type_var.get() or "").strip()
 			valid_doc = bool(doc_no) and _doc_no_is_valid()
 			valid_type = (ft_str != FileType.Unknown.value)
@@ -2308,7 +2413,18 @@ class AppWindow(ttk.Frame):
 				pass
 
 		doc_var.trace_add("write", lambda *_: update_ok_enabled())
+		credit_stem_var.trace_add("write", lambda *_: update_ok_enabled())
+		credit_suffix_var.trace_add("write", lambda *_: update_ok_enabled())
 		type_combo.bind("<<ComboboxSelected>>", lambda _e: update_ok_enabled())
+		try:
+			win.update_idletasks()
+			doc_input_frame.grid_propagate(False)
+			doc_input_frame.configure(
+				width=max(doc_entry.winfo_reqwidth(), credit_doc_frame.winfo_reqwidth()),
+				height=max(doc_entry.winfo_reqheight(), credit_doc_frame.winfo_reqheight()),
+			)
+		except Exception:
+			pass
 		update_ok_enabled()
 
 		win.bind("<Escape>", lambda _e: on_cancel())
@@ -2322,11 +2438,13 @@ class AppWindow(ttk.Frame):
 			on_ok()
 			return "break"
 		doc_entry.bind("<Return>", _on_return)
+		credit_stem_entry.bind("<Return>", _on_return)
+		credit_suffix_entry.bind("<Return>", _on_return)
 		date_entry.bind("<Return>", _on_return)
 		account_entry.bind("<Return>", _on_return)
 		total_entry.bind("<Return>", _on_return)
 		try:
-			doc_entry.focus_set()
+			(credit_stem_entry if initial_file_type == FileType.Credit else doc_entry).focus_set()
 		except Exception:
 			pass
 
