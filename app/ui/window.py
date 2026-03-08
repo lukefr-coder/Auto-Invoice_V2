@@ -329,7 +329,10 @@ class AppWindow(ttk.Frame):
 		if btn is None:
 			return
 		try:
-			btn.configure(state=("disabled" if self._is_busy_for_clear_cache() else "normal"))
+			desired_disabled = self._is_busy_for_clear_cache()
+			current_disabled = btn.instate(["disabled"])
+			if desired_disabled != current_disabled:
+				btn.configure(state=("disabled" if desired_disabled else "normal"))
 		except Exception:
 			pass
 
@@ -861,11 +864,15 @@ class AppWindow(ttk.Frame):
 		except Exception:
 			has_checked = False
 		try:
-			btn_browse.configure(state="normal")
+			if btn_browse.instate(["disabled"]):
+				btn_browse.configure(state="normal")
 		except Exception:
 			pass
 		try:
-			btn_export.configure(state=("disabled" if self._export_inflight else ("normal" if (export_ok and profile_ok and has_checked) else "disabled")))
+			desired_disabled = bool(self._export_inflight or not (export_ok and profile_ok and has_checked))
+			current_disabled = btn_export.instate(["disabled"])
+			if desired_disabled != current_disabled:
+				btn_export.configure(state=("disabled" if desired_disabled else "normal"))
 		except Exception:
 			pass
 
