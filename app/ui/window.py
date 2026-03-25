@@ -137,6 +137,7 @@ class AppWindow(ttk.Frame):
 			"checkbox_enabled": bool(getattr(r, "checkbox_enabled", False)),
 			"source_path": getattr(r, "source_path", ""),
 			"display_name": getattr(r, "display_name", "!"),
+			"deposit_target_path": getattr(r, "deposit_target_path", ""),
 			"fingerprint_sha256": getattr(r, "fingerprint_sha256", ""),
 			"origin_seq": int(getattr(r, "origin_seq", 0) or 0),
 		}
@@ -173,6 +174,7 @@ class AppWindow(ttk.Frame):
 				checkbox_enabled=bool(d.get("checkbox_enabled") or False),
 				source_path=str(d.get("source_path") or ""),
 				display_name=str(d.get("display_name") or "!"),
+				deposit_target_path=str(d.get("deposit_target_path") or ""),
 				fingerprint_sha256=str(d.get("fingerprint_sha256") or ""),
 				origin_seq=origin_seq,
 			)
@@ -219,6 +221,39 @@ class AppWindow(ttk.Frame):
 		self.state.rows = sorted_rows[-500:]
 		return True
 
+	def _reconcile_pending_deposit_row(self, row: RowModel) -> bool:
+		# Rows selected for deposit persist a target path before the worker moves any
+		# file. If the source disappears and that target now exists, finalize the row
+		# as Processed instead of treating it as missing-source cleanup.
+		target = (getattr(row, "deposit_target_path", "") or "").strip()
+		if not target:
+			return False
+		if row.status == RowStatus.Processed:
+			row.deposit_target_path = ""
+			return True
+		src = (row.source_path or "").strip()
+		if src and os.path.exists(src):
+			return False
+		if not os.path.exists(target):
+			return False
+		row.status = RowStatus.Processed
+		row.source_path = target
+		row.checkbox_enabled = False
+		row.checked = False
+		row.deposit_target_path = ""
+		return True
+
+	def _prime_deposit_targets(self, rows: list[RowModel], dest_dir: str) -> bool:
+		changed = False
+		for row in rows:
+			stem = _sanitize_windows_filename_stem(row.display_name)
+			target = os.path.join(dest_dir, f"{stem}.pdf") if stem and stem != "!" else ""
+			if (getattr(row, "deposit_target_path", "") or "") == target:
+				continue
+			row.deposit_target_path = target
+			changed = True
+		return changed
+
 	def _cleanup_missing_sources_once(self) -> bool:
 		changed = False
 		kept: list[RowModel] = []
@@ -226,6 +261,7 @@ class AppWindow(ttk.Frame):
 		known_fp = getattr(self.state, "known_fingerprints", None)
 		for r in list(getattr(self.state, "rows", []) or []):
 			try:
+				changed = self._reconcile_pending_deposit_row(r) or changed
 				if r.status == RowStatus.Processed:
 					kept.append(r)
 					continue
@@ -506,8 +542,9 @@ class AppWindow(ttk.Frame):
 		# Reconcile deleted/missing files (UI-thread only): remove non-Processed rows whose source no longer exists,
 		# and recompute collision groups for impacted display names.
 		removed_canons: set[str] = set()
-		removed_any = False
+		reconciled_any = False
 		for r in list(self.state.rows):
+			reconciled_any = self._reconcile_pending_deposit_row(r) or reconciled_any
 			if r.status == RowStatus.Processed:
 				continue
 			p = (r.source_path or "").strip()
@@ -523,7 +560,7 @@ class AppWindow(ttk.Frame):
 							self.state.known_fingerprints.discard(fp)
 					except Exception:
 						pass
-				removed_any = True
+				reconciled_any = True
 				canon = (r.display_name or "").strip().casefold()
 				if canon and canon != "!":
 					removed_canons.add(canon)
@@ -540,7 +577,7 @@ class AppWindow(ttk.Frame):
 					pass
 		for canon in removed_canons:
 			enforce_display_name_group_status(self.state, canon)
-		if removed_any:
+		if reconciled_any:
 			self.files_grid.refresh()
 			self._sync_file_count()
 			self._persist_history_state()
@@ -1117,6 +1154,7 @@ class AppWindow(ttk.Frame):
 				fname = f"{stem}.pdf"
 				if fname.casefold() in existing:
 					row.status = RowStatus.Review
+					row.deposit_target_path = ""
 					collided_any = True
 		if collided_any:
 			self._persist_history_state()
@@ -1132,6 +1170,8 @@ class AppWindow(ttk.Frame):
 
 		rows_snapshot = list(rows_to_move)
 		dest_dir = dest
+		if self._prime_deposit_targets(rows_snapshot, dest_dir):
+			self._persist_history_state()
 
 		def _deposit_worker(rows_snapshot, dest_dir: str) -> None:
 			results: list[tuple[str, str, str | None]] = []
@@ -1193,12 +1233,17 @@ class AppWindow(ttk.Frame):
 				if new_path:
 					row.status = RowStatus.Processed
 					row.source_path = new_path
+					row.checkbox_enabled = False
+					row.checked = False
+					row.deposit_target_path = ""
 					changed = True
 			elif kind == "collision":
 				row.status = RowStatus.Review
+				row.deposit_target_path = ""
 				changed = True
 			elif kind == "error":
 				row.status = RowStatus.Review
+				row.deposit_target_path = ""
 				changed = True
 
 		if changed:

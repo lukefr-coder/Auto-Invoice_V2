@@ -32,5 +32,6 @@ class RowModel:
 	checkbox_enabled: bool
 	source_path: str = ""
 	display_name: str = "!"
+	deposit_target_path: str = ""
 	fingerprint_sha256: str = ""
 	origin_seq: int = 0
