@@ -6,9 +6,12 @@ from core.row_model import FileType
 from services.ocr_runtime import (
 	is_profile_complete,
 	load_ocr_profile,
+	ocr_pil_image,
 	ocr_pixmap,
 	ocr_pixmap_tsv,
+	pixmap_to_pil_gray,
 	render_normalized_roi_to_pixmap,
+	tighten_text_crop,
 )
 
 
@@ -40,6 +43,122 @@ _MONTHS: dict[str, int] = {
 	"NOV": 11,
 	"DEC": 12,
 }
+
+
+# ── Account-no pilot helpers (Phase 2 doubtful-read recovery) ──────────
+
+
+def _account_per_char_ocr(tight_img) -> str | None:
+	"""Split a tightened text image into character cells and OCR each.
+
+	Returns a 5-char account string ``[A-Z][0-9]{4}`` or ``None``.
+	"""
+	w, h = tight_img.size
+	if w < 15 or h < 8:
+		return None
+
+	_INK = 160
+	px = tight_img.load()
+
+	# Detect per-column ink presence
+	col_has_ink = [
+		any(px[x, y] < _INK for y in range(h))
+		for x in range(w)
+	]
+
+	# Group contiguous ink columns
+	groups: list[tuple[int, int]] = []
+	in_grp = False
+	start = 0
+	for i, has in enumerate(col_has_ink):
+		if has and not in_grp:
+			start = i
+			in_grp = True
+		elif not has and in_grp:
+			groups.append((start, i))
+			in_grp = False
+	if in_grp:
+		groups.append((start, w))
+
+	# Merge groups separated by tiny gap (≤ 2 px)
+	if len(groups) > 1:
+		merged: list[tuple[int, int]] = [groups[0]]
+		for g in groups[1:]:
+			prev = merged[-1]
+			if g[0] - prev[1] <= 2:
+				merged[-1] = (prev[0], g[1])
+			else:
+				merged.append(g)
+		groups = merged
+
+	# Require exactly 5 character groups; fall back to equal split
+	if len(groups) != 5:
+		cell_w = w / 5
+		groups = [(int(i * cell_w), int((i + 1) * cell_w)) for i in range(5)]
+
+	chars: list[str] = []
+	for idx, (x0, x1) in enumerate(groups):
+		cx0 = max(0, x0 - 1)
+		cx1 = min(w, x1 + 1)
+		cell = tight_img.crop((cx0, 0, cx1, h))
+		wl = "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if idx == 0 else "0123456789"
+		ch = ocr_pil_image(cell, psm=10, lang="eng", whitelist=wl).strip()
+		if not ch or len(ch) != 1:
+			return None
+		chars.append(ch.upper())
+
+	result = "".join(chars)
+	if re.match(r"^[A-Z][0-9]{4}$", result):
+		return result
+	return None
+
+
+def _account_no_pilot(pix) -> str | None:
+	"""Doubtful-read pilot: refine ROI and attempt rebuild for account_no.
+
+	Converts the existing pixmap to a cleaned grayscale crop, runs a
+	whole-string OCR retry, then a per-character verify/rebuild.
+	Returns a validated 5-char account string or ``None``.
+	"""
+	try:
+		gray = pixmap_to_pil_gray(pix)
+	except Exception:
+		return None
+
+	tight = tighten_text_crop(gray, pad_px=4)
+	if tight is None:
+		return None
+
+	tw, th = tight.size
+	if tw < 10 or th < 8:
+		return None
+
+	# Whole-string OCR retry on cleaned crop
+	whole_text = ocr_pil_image(
+		tight,
+		psm=7,
+		lang="eng",
+		whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+	).strip().upper().replace(" ", "")
+
+	whole_candidate = None
+	if whole_text and len(whole_text) == 5 and re.match(r"^[A-Z][0-9]{4}$", whole_text):
+		whole_candidate = whole_text
+
+	# Per-character verify/rebuild
+	char_candidate = _account_per_char_ocr(tight)
+
+	# Decision: both agree → accept; one succeeds → accept it; both fail → None
+	if char_candidate is not None and whole_candidate is not None:
+		if char_candidate == whole_candidate:
+			return char_candidate
+		# Disagree: prefer per-char (more targeted)
+		return char_candidate
+	if char_candidate is not None:
+		return char_candidate
+	if whole_candidate is not None:
+		return whole_candidate
+	return None
 
 
 def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str, str]:
@@ -171,6 +290,24 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 						"reason": "SUSPECT_LEADING_LETTER",
 					},
 				)
+		# ── Account pilot: doubtful/suspect read recovery ──
+		_acct_doubtful = (account_str == "!")
+		_acct_suspect = (
+			account_str != "!"
+			and isinstance(account_str, str)
+			and len(account_str) == 5
+			and account_str[0] in ("I", "L")
+			and ("ACCOUNT" in (t or "") or "ACCOUNT" in ((raw or "").upper()))
+		)
+		if _acct_doubtful or _acct_suspect:
+			_pilot = _account_no_pilot(pix)
+			if _pilot is not None and re.match(r"^[A-Z][0-9]{4}$", _pilot):
+				_phase2_debug_log("PHASE2_ACCOUNT_PILOT_ACCEPT", {
+					"pdf_path": pdf_path,
+					"original": account_str,
+					"pilot_result": _pilot,
+				})
+				account_str = _pilot
 	except Exception:
 		account_str = "!"
 		raw_val = locals().get("raw", None)
