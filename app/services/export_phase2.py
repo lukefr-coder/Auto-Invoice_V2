@@ -614,90 +614,130 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 			},
 		)
 
-		# ── Suspect cleaned-win second look (on-demand original ROI) ──
+		# ── Token-level alternate OCR re-read (all valid cleaned winners) ──
+		_token_reread_flipped = False
 		if _total_result is not None and _total_winner == "cleaned":
+			_ct = _total_result.get("chosen_token")
+			if _ct is not None and _tight is not None:
+				try:
+					_tl = int(_ct["left"])
+					_tt_top = int(_ct["top"])
+					_tr = _tl + int(_ct["width"])
+					_tb = _tt_top + int(_ct["height"])
+					_iw, _ih = _tight.size
+					_crop_box = (
+						max(0, _tl - 2),
+						max(0, _tt_top - 1),
+						min(_iw, _tr + 2),
+						min(_ih, _tb + 1),
+					)
+					if _crop_box[2] > _crop_box[0] and _crop_box[3] > _crop_box[1]:
+						_token_crop = _tight.crop(_crop_box)
+						_token_raw = ocr_pil_image(
+							_token_crop, psm=8, lang="eng",
+							whitelist="0123456789.,$",
+						)
+						_token_norm = _normalize_money_raw(_token_raw)
+						_cleaned_total_str = _total_result["total_str"]
+						_token_flip = False
+						_flip_source = None
+						_alt_raw = None
+						_alt_norm = None
+						if (
+							_token_norm is not None
+							and _token_norm != _cleaned_total_str
+							and len(_token_norm) == len(_cleaned_total_str)
+							and _token_norm[1:] == _cleaned_total_str[1:]
+						):
+							_token_flip = True
+							_flip_source = "primary"
+							_total_result = dict(_total_result)
+							_total_result["total_str"] = _token_norm
+							_total_result["normalized"] = _token_norm
+							_total_winner = "cleaned_token_reread"
+							_token_reread_flipped = True
+
+						# ── Alternate token reread when primary returned same as cleaned ──
+						if (
+							not _token_flip
+							and _token_norm is not None
+							and _token_norm == _cleaned_total_str
+						):
+							_alt_crop_box = (
+								max(0, _tl - 4),
+								max(0, _tt_top - 1),
+								min(_iw, _tr + 2),
+								min(_ih, _tb + 1),
+							)
+							if _alt_crop_box[2] > _alt_crop_box[0] and _alt_crop_box[3] > _alt_crop_box[1]:
+								_alt_crop = _tight.crop(_alt_crop_box)
+								_alt_raw = ocr_pil_image(
+									_alt_crop, psm=7, lang="eng",
+									whitelist="0123456789.,$",
+								)
+								_alt_norm = _normalize_money_raw(_alt_raw)
+								if (
+									_alt_norm is not None
+									and _alt_norm != _cleaned_total_str
+									and len(_alt_norm) == len(_cleaned_total_str)
+									and _alt_norm[1:] == _cleaned_total_str[1:]
+								):
+									_token_flip = True
+									_flip_source = "alternate"
+									_total_result = dict(_total_result)
+									_total_result["total_str"] = _alt_norm
+									_total_result["normalized"] = _alt_norm
+									_total_winner = "cleaned_token_reread_alt"
+									_token_reread_flipped = True
+
+						_phase2_debug_log(
+							"PHASE2_TOTAL_TOKEN_REREAD",
+							{
+								"pdf_path": pdf_path,
+								"file_type": file_type,
+								"cleaned_total": _cleaned_total_str,
+								"cleaned_suspect_reason": _check_total_suspect(_total_result),
+								"token_reread_raw": (_token_raw or "").strip(),
+								"token_reread_normalized": _token_norm,
+								"alt_reread_raw": (_alt_raw or "").strip() if _alt_raw is not None else None,
+								"alt_reread_normalized": _alt_norm,
+								"flip_to_token_reread": _token_flip,
+								"flip_source": _flip_source,
+								"chosen_token_text": str((_ct or {}).get("text", "")),
+								"chosen_token_conf": (_ct or {}).get("conf"),
+							},
+						)
+				except Exception:
+					pass
+
+		# ── Suspect cleaned-win second look (on-demand original ROI) ──
+		if _total_result is not None and _total_winner == "cleaned" and not _token_reread_flipped:
 			_cleaned_suspect = _check_total_suspect(_total_result)
 			if _cleaned_suspect is not None:
-				# ── Token-level alternate OCR re-read ──
-				_token_reread_flipped = False
-				_ct = _total_result.get("chosen_token")
-				if _ct is not None and _tight is not None:
-					try:
-						_tl = int(_ct["left"])
-						_tt_top = int(_ct["top"])
-						_tr = _tl + int(_ct["width"])
-						_tb = _tt_top + int(_ct["height"])
-						_iw, _ih = _tight.size
-						_crop_box = (
-							max(0, _tl - 2),
-							max(0, _tt_top - 1),
-							min(_iw, _tr + 2),
-							min(_ih, _tb + 1),
-						)
-						if _crop_box[2] > _crop_box[0] and _crop_box[3] > _crop_box[1]:
-							_token_crop = _tight.crop(_crop_box)
-							_token_raw = ocr_pil_image(
-								_token_crop, psm=8, lang="eng",
-								whitelist="0123456789.,$",
-							)
-							_token_norm = _normalize_money_raw(_token_raw)
-							_cleaned_total_str = _total_result["total_str"]
-							_token_flip = False
-							if (
-								_token_norm is not None
-								and _token_norm != _cleaned_total_str
-								and len(_token_norm) == len(_cleaned_total_str)
-								and _token_norm[1:] == _cleaned_total_str[1:]
-							):
-								_token_flip = True
-								_total_result = dict(_total_result)
-								_total_result["total_str"] = _token_norm
-								_total_result["normalized"] = _token_norm
-								_total_winner = "cleaned_token_reread"
-								_token_reread_flipped = True
-							_phase2_debug_log(
-								"PHASE2_TOTAL_TOKEN_REREAD",
-								{
-									"pdf_path": pdf_path,
-									"file_type": file_type,
-									"cleaned_total": _cleaned_total_str,
-									"cleaned_suspect_reason": _cleaned_suspect,
-									"token_reread_raw": (_token_raw or "").strip(),
-									"token_reread_normalized": _token_norm,
-									"flip_to_token_reread": _token_flip,
-									"chosen_token_text": str((_ct or {}).get("text", "")),
-									"chosen_token_conf": (_ct or {}).get("conf"),
-								},
-							)
-					except Exception:
-						pass
-
-				# ── Original-ROI second look (skip if token reread already flipped) ──
-				if not _token_reread_flipped:
-					_orig_tsv_2nd = ocr_pixmap_tsv(pix, psm=6, lang="eng")
-					_orig_result_2nd = _try_parse_total_from_tsv(_orig_tsv_2nd)
-					_orig_valid = _orig_result_2nd["total_str"] != "!"
-					_orig_suspect = _check_total_suspect(_orig_result_2nd) if _orig_valid else None
-					_orig_agrees = _orig_valid and _orig_result_2nd["total_str"] == _total_result["total_str"]
-					_flip = _orig_valid and not _orig_agrees and _orig_suspect is None
-					_phase2_debug_log(
-						"PHASE2_TOTAL_SUSPECT_SECOND_LOOK",
-						{
-							"pdf_path": pdf_path,
-							"file_type": file_type,
-							"cleaned_total": _total_result["total_str"],
-							"cleaned_suspect_reason": _cleaned_suspect,
-							"orig_total": _orig_result_2nd["total_str"],
-							"orig_valid": _orig_valid,
-							"orig_agrees": _orig_agrees,
-							"orig_suspect_reason": _orig_suspect,
-							"flip_to_original": _flip,
-							"preview_orig": _tsv_preview(_orig_tsv_2nd),
-						},
-					)
-					if _flip:
-						_total_result = _orig_result_2nd
-						_total_winner = "cleaned_suspect_flipped"
+				_orig_tsv_2nd = ocr_pixmap_tsv(pix, psm=6, lang="eng")
+				_orig_result_2nd = _try_parse_total_from_tsv(_orig_tsv_2nd)
+				_orig_valid = _orig_result_2nd["total_str"] != "!"
+				_orig_suspect = _check_total_suspect(_orig_result_2nd) if _orig_valid else None
+				_orig_agrees = _orig_valid and _orig_result_2nd["total_str"] == _total_result["total_str"]
+				_flip = _orig_valid and not _orig_agrees and _orig_suspect is None
+				_phase2_debug_log(
+					"PHASE2_TOTAL_SUSPECT_SECOND_LOOK",
+					{
+						"pdf_path": pdf_path,
+						"file_type": file_type,
+						"cleaned_total": _total_result["total_str"],
+						"cleaned_suspect_reason": _cleaned_suspect,
+						"orig_total": _orig_result_2nd["total_str"],
+						"orig_valid": _orig_valid,
+						"orig_agrees": _orig_agrees,
+						"orig_suspect_reason": _orig_suspect,
+						"flip_to_original": _flip,
+						"preview_orig": _tsv_preview(_orig_tsv_2nd),
+					},
+				)
+				if _flip:
+					_total_result = _orig_result_2nd
+					_total_winner = "cleaned_suspect_flipped"
 
 		# Fallback: original ROI TSV
 		if _total_result is None:
