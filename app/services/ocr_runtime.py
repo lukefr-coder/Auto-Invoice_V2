@@ -406,3 +406,67 @@ def ocr_pil_image(
 				os.unlink(tmp_path)
 			except Exception:
 				pass
+
+
+def ocr_pil_image_tsv(
+	img: Image.Image,
+	*,
+	psm: int = 6,
+	lang: str = "eng",
+	timeout_s: float = 10.0,
+) -> str:
+	"""OCR a PIL Image via Tesseract in TSV mode.  Returns raw TSV stdout."""
+	tmp_path = ""
+	try:
+		with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as f:
+			tmp_path = f.name
+		try:
+			img.save(tmp_path, format="PNG", optimize=False)
+		except Exception:
+			return ""
+
+		repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+		exe_path = os.path.join(repo_root, "tesseract", "tesseract.exe")
+		tessdata_dir = os.path.join(repo_root, "tesseract", "tessdata")
+		if not os.path.exists(exe_path):
+			return ""
+
+		args = [
+			exe_path,
+			tmp_path,
+			"stdout",
+			"--tessdata-dir",
+			tessdata_dir,
+			"-l",
+			str(lang or "eng"),
+			"--psm",
+			str(int(psm)),
+			"tsv",
+		]
+
+		env = dict(os.environ)
+		env["TESSDATA_PREFIX"] = tessdata_dir
+		creationflags = 0
+		try:
+			creationflags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0) or 0)
+		except Exception:
+			creationflags = 0
+
+		try:
+			cp = subprocess.run(
+				args,
+				capture_output=True,
+				text=True,
+				timeout=float(timeout_s),
+				env=env,
+				creationflags=creationflags,
+			)
+		except Exception:
+			return ""
+		return cp.stdout if isinstance(cp.stdout, str) else ""
+	finally:
+		if tmp_path:
+			try:
+				os.unlink(tmp_path)
+			except Exception:
+				pass

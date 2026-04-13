@@ -7,6 +7,7 @@ from services.ocr_runtime import (
 	is_profile_complete,
 	load_ocr_profile,
 	ocr_pil_image,
+	ocr_pil_image_tsv,
 	ocr_pixmap,
 	ocr_pixmap_tsv,
 	pixmap_to_pil_gray,
@@ -27,6 +28,73 @@ def _phase2_debug_log(tag: str, payload: dict):
 			f.write("\n")
 	except Exception:
 		pass
+
+
+def _tsv_preview(raw_tsv: str | None, max_tokens: int = 12) -> str:
+	"""Return a compact preview of TSV text content (non-header tokens)."""
+	if not raw_tsv or not raw_tsv.strip():
+		return ""
+	tokens = []
+	for line in raw_tsv.splitlines()[1:]:
+		parts = line.split("\t")
+		if len(parts) >= 12:
+			txt = parts[11].strip()
+			if txt:
+				tokens.append(txt)
+	preview = " ".join(tokens[:max_tokens])
+	if len(tokens) > max_tokens:
+		preview += f" ... (+{len(tokens) - max_tokens} more)"
+	return preview
+
+
+def _check_total_suspect(result: dict) -> str | None:
+	"""Return a suspect reason if the parse result looks suspicious, else None.
+
+	Reuses the same suspicion rules as the existing PHASE2_TOTAL_SUSPECT_PASS block.
+	"""
+	if result is None or result.get("total_str") == "!":
+		return None
+	anchors = result.get("anchors")
+	if not isinstance(anchors, list) or len(anchors) != 1:
+		return None
+	chosen_token = result.get("chosen_token")
+	sorted_cands = result.get("sorted_cands")
+	candidates = result.get("candidates")
+	if chosen_token is None or not (isinstance(sorted_cands, list) or isinstance(candidates, list)):
+		return None
+	try:
+		chosen_conf = float((chosen_token or {}).get("conf"))
+	except Exception:
+		chosen_conf = None
+	if isinstance(chosen_conf, (int, float)) and chosen_conf < 70:
+		return "LOW_CONFIDENCE_CHOSEN"
+	if isinstance(sorted_cands, list) and len(sorted_cands) >= 2:
+		try:
+			top1_conf = float((sorted_cands[0] or {}).get("conf"))
+			top2_conf = float((sorted_cands[1] or {}).get("conf"))
+		except Exception:
+			top1_conf = None
+			top2_conf = None
+		if (
+			isinstance(top1_conf, (int, float))
+			and isinstance(top2_conf, (int, float))
+			and top1_conf >= 50
+			and top2_conf >= 50
+			and (top1_conf - top2_conf) <= 5
+		):
+			return "CLOSE_SECOND_CANDIDATE"
+	return None
+
+
+def _normalize_money_raw(raw_text: str) -> str | None:
+	"""Normalize a raw OCR money string to 'DDDD.CC' format, or None."""
+	raw = (raw_text or "").strip().replace("$", "").replace(" ", "").replace(",", "")
+	if not raw:
+		return None
+	if re.match(r"^\d+(\.\d{2})$", raw):
+		v = float(raw)
+		return f"{v:.2f}"
+	return None
 
 
 _MONTHS: dict[str, int] = {
@@ -159,6 +227,174 @@ def _account_no_pilot(pix) -> str | None:
 	if whole_candidate is not None:
 		return whole_candidate
 	return None
+
+
+def _try_parse_total_from_tsv(raw_tsv: str) -> dict:
+	"""Parse total from Tesseract TSV output using strict anchor/candidate logic.
+
+	Returns a dict with parsing results and intermediate state for debug logging.
+	Keys: total_str, anchors, sorted_cands, next_line_nums, chosen_token,
+	      normalized, candidates.
+	"""
+	result: dict = {
+		"total_str": "!",
+		"anchors": None,
+		"sorted_cands": None,
+		"next_line_nums": None,
+		"chosen_token": None,
+		"normalized": None,
+		"candidates": None,
+	}
+
+	lines = (raw_tsv or "").splitlines()
+	tokens: list[dict] = []
+	for line in lines:
+		if not line or not line.strip():
+			continue
+		cols = line.split("\t")
+		if len(cols) < 12:
+			continue
+		if cols[0].strip().lower() == "level":
+			continue
+		text = cols[11]
+		if not text or not text.strip():
+			continue
+		try:
+			token = {
+				"block_num": int(cols[2]),
+				"par_num": int(cols[3]),
+				"line_num": int(cols[4]),
+				"word_num": int(cols[5]),
+				"left": int(cols[6]),
+				"top": int(cols[7]),
+				"width": int(cols[8]),
+				"height": int(cols[9]),
+				"conf": float(cols[10]),
+				"text": text,
+			}
+		except Exception:
+			continue
+		tokens.append(token)
+
+	anchors: list[dict] = []
+	for tok in tokens:
+		text_u = str(tok.get("text") or "").strip().upper()
+		if "TOTALEX" in text_u:
+			continue
+		if text_u != "TOTAL":
+			continue
+		line_key = (tok.get("block_num"), tok.get("par_num"), tok.get("line_num"))
+		wn = tok.get("word_num")
+		next_tok = None
+		for other in tokens:
+			if (other.get("block_num"), other.get("par_num"), other.get("line_num")) != line_key:
+				continue
+			try:
+				if int(other.get("word_num")) <= int(wn):
+					continue
+			except Exception:
+				continue
+			if next_tok is None or int(other.get("word_num")) < int(next_tok.get("word_num")):
+				next_tok = other
+		if next_tok is not None:
+			next_text_u = str(next_tok.get("text") or "").strip().upper()
+			if next_text_u == "EX":
+				continue
+		anchors.append(tok)
+
+	result["anchors"] = anchors
+
+	chosen_token = None
+	candidates = None
+	sorted_cands = None
+	next_line_nums = None
+
+	if len(anchors) == 1:
+		anchor = anchors[0]
+		anchor_line_key = (anchor.get("block_num"), anchor.get("par_num"), anchor.get("line_num"))
+		total_right = int(anchor.get("left")) + int(anchor.get("width"))
+		height = int(anchor.get("height"))
+		small_gap_px = max(5, int(height * 0.2))
+		candidates = []
+		for tok in tokens:
+			if (tok.get("block_num"), tok.get("par_num"), tok.get("line_num")) != anchor_line_key:
+				continue
+			cand_left = int(tok.get("left"))
+			if cand_left < total_right + small_gap_px:
+				continue
+			cand_text = str(tok.get("text") or "")
+			if not re.match(r"^[\$\s]*\d[\d,]*(?:\.\d{2})?\s*$", cand_text):
+				continue
+			try:
+				conf = float(tok.get("conf"))
+			except Exception:
+				continue
+			if conf < 50:
+				continue
+			candidates.append(tok)
+
+		if candidates:
+			sorted_cands = sorted(
+				candidates,
+				key=lambda d: (
+					float(d.get("conf")),
+					int(d.get("left")),
+				),
+				reverse=True,
+			)
+			if len(sorted_cands) >= 2:
+				c1 = sorted_cands[0]
+				c2 = sorted_cands[1]
+				if float(c1.get("conf")) == float(c2.get("conf")) and abs(int(c1.get("left")) - int(c2.get("left"))) <= 1:
+					sorted_cands = []
+			if sorted_cands:
+				chosen_token = sorted_cands[0]
+		else:
+			anchor_block_par = (anchor.get("block_num"), anchor.get("par_num"))
+			anchor_line_num = int(anchor.get("line_num"))
+			next_line_num = anchor_line_num + 1
+			next_line_nums = []
+			for tok in tokens:
+				if (tok.get("block_num"), tok.get("par_num")) != anchor_block_par:
+					continue
+				if int(tok.get("line_num")) != next_line_num:
+					continue
+				cand_text = str(tok.get("text") or "")
+				if not re.match(r"^[\$\s]*\d[\d,]*(?:\.\d{2})?\s*$", cand_text):
+					continue
+				try:
+					conf = float(tok.get("conf"))
+				except Exception:
+					continue
+				if conf < 50:
+					continue
+				next_line_nums.append(tok)
+			if len(next_line_nums) == 1:
+				chosen_token = next_line_nums[0]
+
+	result["candidates"] = candidates
+	result["sorted_cands"] = sorted_cands
+	result["next_line_nums"] = next_line_nums
+	result["chosen_token"] = chosen_token
+
+	normalized = None
+	if chosen_token is not None:
+		raw = str(chosen_token.get("text") or "").strip()
+		raw = raw.replace("$", "").replace(" ", "")
+		if re.match(r"^\d+,\d{2}$", raw):
+			normalized = raw.replace(",", ".")
+		elif re.match(r"^\d{1,3}(?:\.\d{3})+,\d{2}$", raw):
+			normalized = raw.replace(".", "").replace(",", ".")
+		elif re.match(r"^\d{1,3}(?:,\d{3})+(?:\.\d{2})$", raw):
+			normalized = raw.replace(",", "")
+		elif re.match(r"^\d+(\.\d{2})$", raw):
+			normalized = raw
+		if normalized is not None and re.match(r"^\d+(\.\d{2})$", normalized):
+			v = float(normalized)
+			result["total_str"] = f"{v:.2f}"
+
+	result["normalized"] = normalized
+	return result
 
 
 def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str, str]:
@@ -343,145 +579,164 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 		roi = section.get("total")
 		dpi = int((roi or {}).get("dpi") or 150)
 		pix = render_normalized_roi_to_pixmap(pdf_path, 0, dpi=dpi, roi=roi or {})
-		raw_tsv = ocr_pixmap_tsv(pix, psm=6, lang="eng")
-		sorted_cands = None
-		next_line_nums = None
-		normalized = None
-		lines = (raw_tsv or "").splitlines()
-		tokens: list[dict] = []
-		for line in lines:
-			if not line or not line.strip():
-				continue
-			cols = line.split("\t")
-			if len(cols) < 12:
-				continue
-			if cols[0].strip().lower() == "level":
-				continue
-			text = cols[11]
-			if not text or not text.strip():
-				continue
-			try:
-				token = {
-					"block_num": int(cols[2]),
-					"par_num": int(cols[3]),
-					"line_num": int(cols[4]),
-					"word_num": int(cols[5]),
-					"left": int(cols[6]),
-					"top": int(cols[7]),
-					"width": int(cols[8]),
-					"height": int(cols[9]),
-					"conf": float(cols[10]),
-					"text": text,
-				}
-			except Exception:
-				continue
-			tokens.append(token)
 
-		anchors: list[dict] = []
-		for tok in tokens:
-			text_u = str(tok.get("text") or "").strip().upper()
-			if "TOTALEX" in text_u:
-				continue
-			if text_u != "TOTAL":
-				continue
-			line_key = (tok.get("block_num"), tok.get("par_num"), tok.get("line_num"))
-			wn = tok.get("word_num")
-			next_tok = None
-			for other in tokens:
-				if (other.get("block_num"), other.get("par_num"), other.get("line_num")) != line_key:
-					continue
-				try:
-					if int(other.get("word_num")) <= int(wn):
-						continue
-				except Exception:
-					continue
-				if next_tok is None or int(other.get("word_num")) < int(next_tok.get("word_num")):
-					next_tok = other
-			if next_tok is not None:
-				next_text_u = str(next_tok.get("text") or "").strip().upper()
-				if next_text_u == "EX":
-					continue
-			anchors.append(tok)
+		# ── Phase 2 total pilot: cleaned/tightened crop as default TSV input ──
+		_cleaned_tsv = None
+		try:
+			_gray = pixmap_to_pil_gray(pix)
+			_tight = tighten_text_crop(_gray, pad_px=4)
+			if _tight is not None:
+				_tw, _th = _tight.size
+				if _tw >= 15 and _th >= 8:
+					_cleaned_tsv = ocr_pil_image_tsv(_tight, psm=6, lang="eng")
+		except Exception:
+			_cleaned_tsv = None
 
-		chosen_token = None
-		if len(anchors) == 1:
-			anchor = anchors[0]
-			anchor_line_key = (anchor.get("block_num"), anchor.get("par_num"), anchor.get("line_num"))
-			total_right = int(anchor.get("left")) + int(anchor.get("width"))
-			height = int(anchor.get("height"))
-			small_gap_px = max(5, int(height * 0.2))
-			candidates: list[dict] = []
-			for tok in tokens:
-				if (tok.get("block_num"), tok.get("par_num"), tok.get("line_num")) != anchor_line_key:
-					continue
-				cand_left = int(tok.get("left"))
-				if cand_left < total_right + small_gap_px:
-					continue
-				cand_text = str(tok.get("text") or "")
-				if not re.match(r"^[\$\s]*\d[\d,]*(?:\.\d{2})?\s*$", cand_text):
-					continue
-				try:
-					conf = float(tok.get("conf"))
-				except Exception:
-					continue
-				if conf < 50:
-					continue
-				candidates.append(tok)
-
-			if candidates:
-				sorted_cands = sorted(
-					candidates,
-					key=lambda d: (
-						float(d.get("conf")),
-						int(d.get("left")),
-					),
-					reverse=True,
-				)
-				if len(sorted_cands) >= 2:
-					c1 = sorted_cands[0]
-					c2 = sorted_cands[1]
-					if float(c1.get("conf")) == float(c2.get("conf")) and abs(int(c1.get("left")) - int(c2.get("left"))) <= 1:
-						sorted_cands = []
-				if sorted_cands:
-					chosen_token = sorted_cands[0]
+		# Try cleaned TSV first (default path)
+		_total_result = None
+		_total_winner = None
+		if _cleaned_tsv and _cleaned_tsv.strip():
+			_total_result = _try_parse_total_from_tsv(_cleaned_tsv)
+			if _total_result["total_str"] == "!":
+				_total_result = None  # structural failure, fall back
 			else:
-				anchor_block_par = (anchor.get("block_num"), anchor.get("par_num"))
-				anchor_line_num = int(anchor.get("line_num"))
-				next_line_num = anchor_line_num + 1
-				next_line_nums: list[dict] = []
-				for tok in tokens:
-					if (tok.get("block_num"), tok.get("par_num")) != anchor_block_par:
-						continue
-					if int(tok.get("line_num")) != next_line_num:
-						continue
-					cand_text = str(tok.get("text") or "")
-					if not re.match(r"^[\$\s]*\d[\d,]*(?:\.\d{2})?\s*$", cand_text):
-						continue
-					try:
-						conf = float(tok.get("conf"))
-					except Exception:
-						continue
-					if conf < 50:
-						continue
-					next_line_nums.append(tok)
-				if len(next_line_nums) == 1:
-					chosen_token = next_line_nums[0]
+				_total_winner = "cleaned"
+		_phase2_debug_log(
+			"PHASE2_TOTAL_CLEANED_TSV",
+			{
+				"pdf_path": pdf_path,
+				"file_type": file_type,
+				"source": "cleaned",
+				"existed": _cleaned_tsv is not None,
+				"non_empty": bool(_cleaned_tsv and _cleaned_tsv.strip()),
+				"preview": _tsv_preview(_cleaned_tsv),
+				"parsed_total": _total_result["total_str"] if _total_result else None,
+			},
+		)
 
-		if chosen_token is not None:
-			raw = str(chosen_token.get("text") or "").strip()
-			raw = raw.replace("$", "").replace(" ", "")
-			normalized = None
-			if re.match(r"^\d+,\d{2}$", raw):
-				normalized = raw.replace(",", ".")
-			elif re.match(r"^\d{1,3}(?:\.\d{3})+,\d{2}$", raw):
-				normalized = raw.replace(".", "").replace(",", ".")
-			elif re.match(r"^\d{1,3}(?:,\d{3})+(?:\.\d{2})$", raw):
-				normalized = raw.replace(",", "")
-			elif re.match(r"^\d+(\.\d{2})$", raw):
-				normalized = raw
-			if normalized is not None and re.match(r"^\d+(\.\d{2})$", normalized):
-				v = float(normalized)
-				total_str = f"{v:.2f}"
+		# ── Suspect cleaned-win second look (on-demand original ROI) ──
+		if _total_result is not None and _total_winner == "cleaned":
+			_cleaned_suspect = _check_total_suspect(_total_result)
+			if _cleaned_suspect is not None:
+				# ── Token-level alternate OCR re-read ──
+				_token_reread_flipped = False
+				_ct = _total_result.get("chosen_token")
+				if _ct is not None and _tight is not None:
+					try:
+						_tl = int(_ct["left"])
+						_tt_top = int(_ct["top"])
+						_tr = _tl + int(_ct["width"])
+						_tb = _tt_top + int(_ct["height"])
+						_iw, _ih = _tight.size
+						_crop_box = (
+							max(0, _tl - 2),
+							max(0, _tt_top - 1),
+							min(_iw, _tr + 2),
+							min(_ih, _tb + 1),
+						)
+						if _crop_box[2] > _crop_box[0] and _crop_box[3] > _crop_box[1]:
+							_token_crop = _tight.crop(_crop_box)
+							_token_raw = ocr_pil_image(
+								_token_crop, psm=8, lang="eng",
+								whitelist="0123456789.,$",
+							)
+							_token_norm = _normalize_money_raw(_token_raw)
+							_cleaned_total_str = _total_result["total_str"]
+							_token_flip = False
+							if (
+								_token_norm is not None
+								and _token_norm != _cleaned_total_str
+								and len(_token_norm) == len(_cleaned_total_str)
+								and _token_norm[1:] == _cleaned_total_str[1:]
+							):
+								_token_flip = True
+								_total_result = dict(_total_result)
+								_total_result["total_str"] = _token_norm
+								_total_result["normalized"] = _token_norm
+								_total_winner = "cleaned_token_reread"
+								_token_reread_flipped = True
+							_phase2_debug_log(
+								"PHASE2_TOTAL_TOKEN_REREAD",
+								{
+									"pdf_path": pdf_path,
+									"file_type": file_type,
+									"cleaned_total": _cleaned_total_str,
+									"cleaned_suspect_reason": _cleaned_suspect,
+									"token_reread_raw": (_token_raw or "").strip(),
+									"token_reread_normalized": _token_norm,
+									"flip_to_token_reread": _token_flip,
+									"chosen_token_text": str((_ct or {}).get("text", "")),
+									"chosen_token_conf": (_ct or {}).get("conf"),
+								},
+							)
+					except Exception:
+						pass
+
+				# ── Original-ROI second look (skip if token reread already flipped) ──
+				if not _token_reread_flipped:
+					_orig_tsv_2nd = ocr_pixmap_tsv(pix, psm=6, lang="eng")
+					_orig_result_2nd = _try_parse_total_from_tsv(_orig_tsv_2nd)
+					_orig_valid = _orig_result_2nd["total_str"] != "!"
+					_orig_suspect = _check_total_suspect(_orig_result_2nd) if _orig_valid else None
+					_orig_agrees = _orig_valid and _orig_result_2nd["total_str"] == _total_result["total_str"]
+					_flip = _orig_valid and not _orig_agrees and _orig_suspect is None
+					_phase2_debug_log(
+						"PHASE2_TOTAL_SUSPECT_SECOND_LOOK",
+						{
+							"pdf_path": pdf_path,
+							"file_type": file_type,
+							"cleaned_total": _total_result["total_str"],
+							"cleaned_suspect_reason": _cleaned_suspect,
+							"orig_total": _orig_result_2nd["total_str"],
+							"orig_valid": _orig_valid,
+							"orig_agrees": _orig_agrees,
+							"orig_suspect_reason": _orig_suspect,
+							"flip_to_original": _flip,
+							"preview_orig": _tsv_preview(_orig_tsv_2nd),
+						},
+					)
+					if _flip:
+						_total_result = _orig_result_2nd
+						_total_winner = "cleaned_suspect_flipped"
+
+		# Fallback: original ROI TSV
+		if _total_result is None:
+			_orig_tsv = ocr_pixmap_tsv(pix, psm=6, lang="eng")
+			_total_result = _try_parse_total_from_tsv(_orig_tsv)
+			_total_winner = "fallback"
+			_phase2_debug_log(
+				"PHASE2_TOTAL_FALLBACK_TSV",
+				{
+					"pdf_path": pdf_path,
+					"file_type": file_type,
+					"source": "original_fallback",
+					"existed": _orig_tsv is not None,
+					"non_empty": bool(_orig_tsv and _orig_tsv.strip()),
+					"preview": _tsv_preview(_orig_tsv),
+					"parsed_total": _total_result["total_str"] if _total_result else None,
+				},
+			)
+
+		total_str = _total_result["total_str"]
+		anchors = _total_result["anchors"]
+		sorted_cands = _total_result["sorted_cands"]
+		next_line_nums = _total_result["next_line_nums"]
+		chosen_token = _total_result["chosen_token"]
+		normalized = _total_result["normalized"]
+		candidates = _total_result["candidates"]
+
+		_phase2_debug_log(
+			"PHASE2_TOTAL_FINAL",
+			{
+				"pdf_path": pdf_path,
+				"file_type": file_type,
+				"winner": _total_winner,
+				"final_total_str": total_str,
+				"chosen_token": chosen_token,
+				"normalized": normalized,
+			},
+		)
+
 		if total_str == "!":
 			anchors_val = locals().get("anchors", None)
 			sorted_cands_val = locals().get("sorted_cands", None)
