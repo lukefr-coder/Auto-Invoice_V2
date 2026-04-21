@@ -655,7 +655,7 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 						_cleaned_chosen_conf = float((_ct or {}).get("conf"))
 					except Exception:
 						_cleaned_chosen_conf = None
-					_STRONG_CLEANED_KEEP_CONF = 85.0
+					_STRONG_CLEANED_KEEP_CONF = 90.0
 					_hard_keep_cleaned = (
 						isinstance(_cleaned_chosen_conf, (int, float))
 						and _cleaned_chosen_conf >= _STRONG_CLEANED_KEEP_CONF
