@@ -47,6 +47,109 @@ def _tsv_preview(raw_tsv: str | None, max_tokens: int = 12) -> str:
 	return preview
 
 
+def _is_single_gst_like_preview(preview: str | None) -> bool:
+	"""Return True when preview collapses to a single GST amount line like 'GST 11.85'."""
+	p = re.sub(r"\s+", " ", str(preview or "").upper()).strip()
+	if not p or "..." in p:
+		return False
+	return bool(re.match(r"^GST\s+\d[\d,]*(?:\.\d{2})$", p))
+
+
+def _normalize_money_token_text(token_text: str) -> str | None:
+	"""Normalize OCR money token text using the same strict rules as total parser."""
+	raw = str(token_text or "").strip().replace("$", "").replace(" ", "")
+	if re.match(r"^\d+,\d{2}$", raw):
+		normalized = raw.replace(",", ".")
+	elif re.match(r"^\d{1,3}(?:\.\d{3})+,\d{2}$", raw):
+		normalized = raw.replace(".", "").replace(",", ".")
+	elif re.match(r"^\d{1,3}(?:,\d{3})+(?:\.\d{2})$", raw):
+		normalized = raw.replace(",", "")
+	elif re.match(r"^\d+(\.\d{2})$", raw):
+		normalized = raw
+	else:
+		return None
+	if re.match(r"^\d+(\.\d{2})$", normalized):
+		return f"{float(normalized):.2f}"
+	return None
+
+
+def _parse_tsv_tokens(raw_tsv: str) -> list[dict]:
+	"""Parse non-empty word tokens from Tesseract TSV text."""
+	tokens: list[dict] = []
+	for line in (raw_tsv or "").splitlines():
+		if not line or not line.strip():
+			continue
+		cols = line.split("\t")
+		if len(cols) < 12:
+			continue
+		if cols[0].strip().lower() == "level":
+			continue
+		text = cols[11]
+		if not text or not text.strip():
+			continue
+		try:
+			tokens.append(
+				{
+					"block_num": int(cols[2]),
+					"par_num": int(cols[3]),
+					"line_num": int(cols[4]),
+					"word_num": int(cols[5]),
+					"left": int(cols[6]),
+					"top": int(cols[7]),
+					"width": int(cols[8]),
+					"height": int(cols[9]),
+					"conf": float(cols[10]),
+					"text": text,
+				}
+			)
+		except Exception:
+			continue
+	return tokens
+
+
+def _alt_psm11_secondary_total_rescue(raw_tsv: str, anchor_tok: dict) -> tuple[str | None, dict | None, int]:
+	"""Secondary strict candidate search for alt psm=11 layout fragmentation cases."""
+	tokens = _parse_tsv_tokens(raw_tsv)
+	try:
+		anchor_left = int(anchor_tok.get("left"))
+		anchor_top = int(anchor_tok.get("top"))
+		anchor_w = int(anchor_tok.get("width"))
+		anchor_h = int(anchor_tok.get("height"))
+	except Exception:
+		return (None, None, 0)
+
+	anchor_right = anchor_left + anchor_w
+	anchor_cy = anchor_top + (anchor_h / 2.0)
+	min_right_gap = max(3, int(anchor_h * 0.1))
+	qualifying: list[dict] = []
+	for tok in tokens:
+		cand_text = str(tok.get("text") or "")
+		if not re.match(r"^[\$\s]*\d[\d,]*(?:\.\d{2})?\s*$", cand_text):
+			continue
+		try:
+			cand_left = int(tok.get("left"))
+			cand_top = int(tok.get("top"))
+			cand_h = int(tok.get("height"))
+		except Exception:
+			continue
+		if cand_left < anchor_right + min_right_gap:
+			continue
+		cand_cy = cand_top + (cand_h / 2.0)
+		max_y_delta = max(anchor_h, cand_h) * 1.25
+		if abs(cand_cy - anchor_cy) > max_y_delta:
+			continue
+		qualifying.append(tok)
+
+	if len(qualifying) != 1:
+		return (None, None, len(qualifying))
+
+	chosen = qualifying[0]
+	normalized = _normalize_money_token_text(str(chosen.get("text") or ""))
+	if normalized is None:
+		return (None, None, len(qualifying))
+	return (normalized, chosen, len(qualifying))
+
+
 def _check_total_suspect(result: dict) -> str | None:
 	"""Return a suspect reason if the parse result looks suspicious, else None.
 
@@ -638,9 +741,13 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 		# Try cleaned TSV first (default path)
 		_total_result = None
 		_total_winner = None
+		_cleaned_result_failed = None
+		_cleaned_preview = _tsv_preview(_cleaned_tsv)
 		if _cleaned_tsv and _cleaned_tsv.strip():
-			_total_result = _try_parse_total_from_tsv(_cleaned_tsv)
-			if _total_result["total_str"] == "!":
+			_cleaned_try = _try_parse_total_from_tsv(_cleaned_tsv)
+			_total_result = _cleaned_try
+			if _cleaned_try["total_str"] == "!":
+				_cleaned_result_failed = _cleaned_try
 				_total_result = None  # structural failure, fall back
 			else:
 				_total_winner = "cleaned"
@@ -652,7 +759,7 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 				"source": "cleaned",
 				"existed": _cleaned_tsv is not None,
 				"non_empty": bool(_cleaned_tsv and _cleaned_tsv.strip()),
-				"preview": _tsv_preview(_cleaned_tsv),
+				"preview": _cleaned_preview,
 				"parsed_total": _total_result["total_str"] if _total_result else None,
 			},
 		)
@@ -830,10 +937,16 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 					_total_winner = "cleaned_suspect_flipped"
 
 		# Fallback: original ROI TSV
+		_orig_tsv = None
+		_orig_preview = ""
+		_orig_result_failed = None
 		if _total_result is None:
 			_orig_tsv = ocr_pixmap_tsv(pix, psm=6, lang="eng")
+			_orig_preview = _tsv_preview(_orig_tsv)
 			_total_result = _try_parse_total_from_tsv(_orig_tsv)
 			_total_winner = "fallback"
+			if _total_result["total_str"] == "!":
+				_orig_result_failed = _total_result
 			_phase2_debug_log(
 				"PHASE2_TOTAL_FALLBACK_TSV",
 				{
@@ -842,8 +955,78 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 					"source": "original_fallback",
 					"existed": _orig_tsv is not None,
 					"non_empty": bool(_orig_tsv and _orig_tsv.strip()),
-					"preview": _tsv_preview(_orig_tsv),
+					"preview": _orig_preview,
 					"parsed_total": _total_result["total_str"] if _total_result else None,
+				},
+			)
+
+		# Narrow rescue: when both normal views miss anchor and collapse to same GST-only preview,
+		# try one alternate sparse-text OCR pass on the same ROI.
+		if (
+			_total_result is not None
+			and _total_result.get("total_str") == "!"
+			and _cleaned_result_failed is not None
+			and _orig_result_failed is not None
+		):
+			_cleaned_anchors = _cleaned_result_failed.get("anchors")
+			_orig_anchors = _orig_result_failed.get("anchors")
+			_no_anchor_both = (
+				isinstance(_cleaned_anchors, list)
+				and len(_cleaned_anchors) == 0
+				and isinstance(_orig_anchors, list)
+				and len(_orig_anchors) == 0
+			)
+			_cleaned_preview_norm = re.sub(r"\s+", " ", str(_cleaned_preview or "").upper()).strip()
+			_orig_preview_norm = re.sub(r"\s+", " ", str(_orig_preview or "").upper()).strip()
+			_same_single_gst_preview = (
+				_is_single_gst_like_preview(_cleaned_preview)
+				and _is_single_gst_like_preview(_orig_preview)
+				and _cleaned_preview_norm == _orig_preview_norm
+			)
+			_should_run_psm11 = _no_anchor_both and _same_single_gst_preview
+			_alt_preview = ""
+			_alt_usable = False
+			_alt_secondary_ran = False
+			_alt_secondary_qualifying_count = 0
+			_alt_secondary_used = False
+			if _should_run_psm11:
+				_alt_tsv = ocr_pixmap_tsv(pix, psm=11, lang="eng")
+				_alt_preview = _tsv_preview(_alt_tsv)
+				_alt_result = _try_parse_total_from_tsv(_alt_tsv)
+				_alt_usable = _alt_result.get("total_str") != "!"
+				if (
+					not _alt_usable
+					and isinstance(_alt_result.get("anchors"), list)
+					and len(_alt_result.get("anchors")) == 1
+				):
+					_alt_secondary_ran = True
+					_alt_norm, _alt_tok, _alt_secondary_qualifying_count = _alt_psm11_secondary_total_rescue(
+						_alt_tsv,
+						_alt_result["anchors"][0],
+					)
+					if _alt_norm is not None and _alt_tok is not None:
+						_alt_result = dict(_alt_result)
+						_alt_result["chosen_token"] = _alt_tok
+						_alt_result["normalized"] = _alt_norm
+						_alt_result["total_str"] = _alt_norm
+						_alt_usable = True
+						_alt_secondary_used = True
+				if _alt_usable:
+					_total_result = _alt_result
+					_total_winner = "fallback_psm11_anchor_rescue"
+			_phase2_debug_log(
+				"PHASE2_TOTAL_ALT_PSM11",
+				{
+					"pdf_path": pdf_path,
+					"file_type": file_type,
+					"ran": _should_run_psm11,
+					"cleaned_preview": _cleaned_preview,
+					"fallback_preview": _orig_preview,
+					"alt_preview": _alt_preview,
+					"alt_secondary_ran": _alt_secondary_ran,
+					"alt_secondary_qualifying_count": _alt_secondary_qualifying_count,
+					"alt_secondary_used": _alt_secondary_used,
+					"alt_usable": _alt_usable,
 				},
 			)
 
