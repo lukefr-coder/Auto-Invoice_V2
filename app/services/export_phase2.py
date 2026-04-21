@@ -308,10 +308,12 @@ def _try_parse_total_from_tsv(raw_tsv: str) -> dict:
 
 	anchors: list[dict] = []
 	for tok in tokens:
-		text_u = str(tok.get("text") or "").strip().upper()
-		if "TOTALEX" in text_u:
+		text_u_raw = str(tok.get("text") or "").strip().upper()
+		# Keep exact anchor match primary; allow only tiny OCR confusion normalization.
+		text_u_norm = text_u_raw.replace("!", "L").replace("|", "L")
+		if "TOTALEX" in text_u_norm:
 			continue
-		if text_u != "TOTAL":
+		if text_u_raw != "TOTAL" and text_u_norm != "TOTAL":
 			continue
 		line_key = (tok.get("block_num"), tok.get("par_num"), tok.get("line_num"))
 		wn = tok.get("word_num")
@@ -327,8 +329,9 @@ def _try_parse_total_from_tsv(raw_tsv: str) -> dict:
 			if next_tok is None or int(other.get("word_num")) < int(next_tok.get("word_num")):
 				next_tok = other
 		if next_tok is not None:
-			next_text_u = str(next_tok.get("text") or "").strip().upper()
-			if next_text_u == "EX":
+			next_text_u_raw = str(next_tok.get("text") or "").strip().upper()
+			next_text_u_norm = next_text_u_raw.replace("!", "L").replace("|", "L")
+			if next_text_u_raw == "EX" or next_text_u_norm == "EX":
 				continue
 		anchors.append(tok)
 
