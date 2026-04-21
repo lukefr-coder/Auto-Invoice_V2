@@ -274,6 +274,7 @@ def _try_parse_total_from_tsv(raw_tsv: str) -> dict:
 		"chosen_token": None,
 		"normalized": None,
 		"candidates": None,
+		"low_conf_same_line_fallback_used": False,
 	}
 
 	lines = (raw_tsv or "").splitlines()
@@ -341,6 +342,7 @@ def _try_parse_total_from_tsv(raw_tsv: str) -> dict:
 	candidates = None
 	sorted_cands = None
 	next_line_nums = None
+	low_conf_same_line_fallback_used = False
 
 	if len(anchors) == 1:
 		anchor = anchors[0]
@@ -349,6 +351,7 @@ def _try_parse_total_from_tsv(raw_tsv: str) -> dict:
 		height = int(anchor.get("height"))
 		small_gap_px = max(5, int(height * 0.2))
 		candidates = []
+		same_line_strict_amount_tokens = []
 		for tok in tokens:
 			if (tok.get("block_num"), tok.get("par_num"), tok.get("line_num")) != anchor_line_key:
 				continue
@@ -358,6 +361,7 @@ def _try_parse_total_from_tsv(raw_tsv: str) -> dict:
 			cand_text = str(tok.get("text") or "")
 			if not re.match(r"^[\$\s]*\d[\d,]*(?:\.\d{2})?\s*$", cand_text):
 				continue
+			same_line_strict_amount_tokens.append(tok)
 			try:
 				conf = float(tok.get("conf"))
 			except Exception:
@@ -383,32 +387,38 @@ def _try_parse_total_from_tsv(raw_tsv: str) -> dict:
 			if sorted_cands:
 				chosen_token = sorted_cands[0]
 		else:
-			anchor_block_par = (anchor.get("block_num"), anchor.get("par_num"))
-			anchor_line_num = int(anchor.get("line_num"))
-			next_line_num = anchor_line_num + 1
-			next_line_nums = []
-			for tok in tokens:
-				if (tok.get("block_num"), tok.get("par_num")) != anchor_block_par:
-					continue
-				if int(tok.get("line_num")) != next_line_num:
-					continue
-				cand_text = str(tok.get("text") or "")
-				if not re.match(r"^[\$\s]*\d[\d,]*(?:\.\d{2})?\s*$", cand_text):
-					continue
-				try:
-					conf = float(tok.get("conf"))
-				except Exception:
-					continue
-				if conf < 50:
-					continue
-				next_line_nums.append(tok)
-			if len(next_line_nums) == 1:
-				chosen_token = next_line_nums[0]
+			# Narrow fail-closed rescue: one strict same-line amount token rejected only by confidence gate.
+			if len(same_line_strict_amount_tokens) == 1:
+				chosen_token = same_line_strict_amount_tokens[0]
+				low_conf_same_line_fallback_used = True
+			else:
+				anchor_block_par = (anchor.get("block_num"), anchor.get("par_num"))
+				anchor_line_num = int(anchor.get("line_num"))
+				next_line_num = anchor_line_num + 1
+				next_line_nums = []
+				for tok in tokens:
+					if (tok.get("block_num"), tok.get("par_num")) != anchor_block_par:
+						continue
+					if int(tok.get("line_num")) != next_line_num:
+						continue
+					cand_text = str(tok.get("text") or "")
+					if not re.match(r"^[\$\s]*\d[\d,]*(?:\.\d{2})?\s*$", cand_text):
+						continue
+					try:
+						conf = float(tok.get("conf"))
+					except Exception:
+						continue
+					if conf < 50:
+						continue
+					next_line_nums.append(tok)
+				if len(next_line_nums) == 1:
+					chosen_token = next_line_nums[0]
 
 	result["candidates"] = candidates
 	result["sorted_cands"] = sorted_cands
 	result["next_line_nums"] = next_line_nums
 	result["chosen_token"] = chosen_token
+	result["low_conf_same_line_fallback_used"] = low_conf_same_line_fallback_used
 
 	normalized = None
 	if chosen_token is not None:
@@ -844,6 +854,7 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 		chosen_token = _total_result["chosen_token"]
 		normalized = _total_result["normalized"]
 		candidates = _total_result["candidates"]
+		low_conf_same_line_fallback_used = _total_result.get("low_conf_same_line_fallback_used", False)
 
 		_phase2_debug_log(
 			"PHASE2_TOTAL_FINAL",
@@ -854,6 +865,7 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 				"final_total_str": total_str,
 				"chosen_token": chosen_token,
 				"normalized": normalized,
+				"low_conf_same_line_fallback_used": low_conf_same_line_fallback_used,
 			},
 		)
 
