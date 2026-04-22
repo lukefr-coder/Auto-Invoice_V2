@@ -349,17 +349,45 @@ def _account_no_pilot(pix) -> str | None:
 	# Per-character verify/rebuild
 	char_candidate = _account_per_char_ocr(tight)
 
-	# Decision: both agree → accept; one succeeds → accept it; both fail → None
+	# Decision: require both paths to agree (corroboration).
+	# A single-path result is not accepted to avoid uncorroborated wrong-valid rescues.
 	if char_candidate is not None and whole_candidate is not None:
 		if char_candidate == whole_candidate:
 			return char_candidate
-		# Disagree: prefer per-char (more targeted)
-		return char_candidate
-	if char_candidate is not None:
-		return char_candidate
-	if whole_candidate is not None:
-		return whole_candidate
+		# Paths disagree: cannot determine which is correct → fail-closed.
+		return None
+	# Only one path succeeded: insufficient corroboration → fail-closed.
 	return None
+
+
+def _extract_account_candidates(raw_text: str | None) -> tuple[list[str], set[str], str]:
+	"""Extract strict account candidates using narrow account-specific normalization."""
+	t = (raw_text or "").upper()
+	t = re.sub(r"\b([A-Z$])\s+([0-9OIL]{4})\b", r"\1\2", t)
+	t = re.sub(r"(?<=\d)O(?=\d)", "0", t)
+	t = re.sub(r"(?<=\d)[IL](?=\d)", "1", t)
+	t = re.sub(r"(?<=\d)[IL](?=\b)", "1", t)
+	t = re.sub(r"(?<=\d)O(?=\b)", "0", t)
+
+	matches: list[str] = []
+	cands: set[str] = set()
+	for token in re.findall(r"[A-Z0-9$]+", t):
+		# Narrow noisy-prefix handling: only trim to a 5-char suffix token.
+		cand_token = token[-5:] if len(token) > 5 else token
+		if len(cand_token) != 5:
+			continue
+		lead = cand_token[0]
+		tail = cand_token[1:].replace("O", "0").replace("I", "1").replace("L", "1")
+		if not tail.isdigit():
+			continue
+		if lead == "$":
+			lead = "S"
+		candidate = f"{lead}{tail}"
+		if re.match(r"^[A-Z][0-9]{4}$", candidate):
+			matches.append(candidate)
+			cands.add(candidate)
+
+	return (matches, cands, t)
 
 
 def _try_parse_total_from_tsv(raw_tsv: str) -> dict:
@@ -596,29 +624,40 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 		roi = section.get("account_no")
 		dpi = int((roi or {}).get("dpi") or 150)
 		pix = render_normalized_roi_to_pixmap(pdf_path, 0, dpi=dpi, roi=roi or {})
-		raw = ocr_pixmap(pix, psm=6, lang="eng")
-		t = (raw or "").upper()
-		t = re.sub(r"\b([A-Z])\s+(\d{4})\b", r"\1\2", t)
-		t = re.sub(r"(?<=\d)O(?=\d)", "0", t)
-		t = re.sub(r"(?<=\b[A-Z]\d)O(?=\d)", "0", t)
-		t = re.sub(r"(?<=\d)[IL](?=\d)", "1", t)
-		t = re.sub(r"(?<=\d)[IL](?=\b)", "1", t)
-		t = re.sub(r"(?<=\d)O(?=\b)", "0", t)
-		t = re.sub(
-			r"\b[A-Z][0-9OIL]{4}\b",
-			lambda m: m.group(0).replace("O", "0").replace("I", "1").replace("L", "1"),
-			t,
-		)
-		if "ACCOUNT" in t:
-			t = re.sub(r"\b1(\d{4})\b", r"I\1", t)
-			t = re.sub(r"(?<![A-Z0-9])\$(?=\d{4}\b)", "S", t)
-		matches = re.findall(r"\b[A-Z][0-9]{4}\b", t)
-		cands: set[str] = {m for m in matches if m}
+		# Cleaned/tightened OCR is the primary account read.
+		cleaned_raw = ""
+		raw = ""
+		primary_source = "cleaned"
+		try:
+			gray = pixmap_to_pil_gray(pix)
+			tight = tighten_text_crop(gray, pad_px=4)
+			if tight is not None:
+				tw, th = tight.size
+				if tw >= 10 and th >= 8:
+					cleaned_raw = ocr_pil_image(
+						tight,
+						psm=7,
+						lang="eng",
+						whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$",
+					).strip()
+		except Exception:
+			cleaned_raw = ""
+
+		matches, cands, t = _extract_account_candidates(cleaned_raw)
+
+		# Raw OCR remains fallback only when cleaned-primary is not uniquely valid.
+		if len(cands) != 1:
+			primary_source = "raw"
+			raw = ocr_pixmap(pix, psm=6, lang="eng")
+			matches, cands, t = _extract_account_candidates(raw)
+
 		if len(cands) == 1:
 			account_str = next(iter(cands))
 		if account_str == "!":
 			reason = "UNKNOWN_ACCOUNT_FAIL"
-			if not raw or raw.strip() == "":
+			if primary_source == "cleaned" and (not cleaned_raw or cleaned_raw.strip() == ""):
+				reason = "EMPTY_CLEANED_OCR"
+			elif primary_source == "raw" and (not raw or raw.strip() == ""):
 				reason = "EMPTY_OCR"
 			elif len(matches) == 0:
 				reason = "NO_REGEX_MATCH"
@@ -631,7 +670,10 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 					"file_type": file_type,
 					"roi": roi,
 					"dpi": (roi or {}).get("dpi"),
-					"raw_ocr": raw,
+					"raw_ocr": cleaned_raw if primary_source == "cleaned" else raw,
+					"raw_ocr_cleaned": cleaned_raw,
+					"raw_ocr_raw": raw,
+					"primary_source": primary_source,
 					"normalized_text": t,
 					"regex_matches": matches,
 					"unique_candidates": list(cands),
@@ -641,7 +683,7 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 			)
 		if account_str != "!":
 			account_str_val = account_str
-			raw_val = raw
+			raw_val = cleaned_raw if primary_source == "cleaned" else raw
 			t_val = t
 			account_gate_ok = False
 			if isinstance(account_str_val, str) and len(account_str_val) == 5:
@@ -665,6 +707,7 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 						"roi": roi,
 						"dpi": (roi or {}).get("dpi"),
 						"raw_ocr": raw_val,
+						"primary_source": primary_source,
 						"normalized_text": t_val,
 						"account_str": account_str_val,
 						"matches": matches,
@@ -672,33 +715,31 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 						"reason": "SUSPECT_LEADING_LETTER",
 					},
 				)
-		# ── Account pilot: doubtful/suspect read recovery ──
+		# ── Account pilot: doubtful-only read recovery ──
 		_acct_doubtful = (account_str == "!")
-		_acct_suspect = (
-			account_str != "!"
-			and isinstance(account_str, str)
-			and len(account_str) == 5
-			and account_str[0] in ("I", "L")
-			and ("ACCOUNT" in (t or "") or "ACCOUNT" in ((raw or "").upper()))
-		)
-		if _acct_doubtful or _acct_suspect:
+		if _acct_doubtful:
 			_pilot = _account_no_pilot(pix)
 			if _pilot is not None and re.match(r"^[A-Z][0-9]{4}$", _pilot):
 				_phase2_debug_log("PHASE2_ACCOUNT_PILOT_ACCEPT", {
 					"pdf_path": pdf_path,
 					"original": account_str,
 					"pilot_result": _pilot,
+					"primary_source": primary_source,
 				})
 				account_str = _pilot
 	except Exception:
 		account_str = "!"
 		raw_val = locals().get("raw", None)
+		cleaned_raw_val = locals().get("cleaned_raw", None)
+		primary_source_val = locals().get("primary_source", "cleaned")
 		roi_val = locals().get("roi", section.get("account_no"))
 		t_val = locals().get("t", "")
 		matches_val = locals().get("matches", [])
 		cands_val = locals().get("cands", set())
 		reason = "UNKNOWN_ACCOUNT_FAIL"
-		if not raw_val or str(raw_val).strip() == "":
+		if primary_source_val == "cleaned" and (not cleaned_raw_val or str(cleaned_raw_val).strip() == ""):
+			reason = "EMPTY_CLEANED_OCR"
+		elif primary_source_val == "raw" and (not raw_val or str(raw_val).strip() == ""):
 			reason = "EMPTY_OCR"
 		elif len(matches_val) == 0:
 			reason = "NO_REGEX_MATCH"
@@ -711,7 +752,10 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 				"file_type": file_type,
 				"roi": roi_val,
 				"dpi": (roi_val or {}).get("dpi") if isinstance(roi_val, dict) or roi_val is None else None,
-				"raw_ocr": raw_val,
+				"raw_ocr": cleaned_raw_val if primary_source_val == "cleaned" else raw_val,
+				"raw_ocr_cleaned": cleaned_raw_val,
+				"raw_ocr_raw": raw_val,
+				"primary_source": primary_source_val,
 				"normalized_text": t_val,
 				"regex_matches": matches_val,
 				"unique_candidates": list(cands_val),
