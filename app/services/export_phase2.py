@@ -390,6 +390,125 @@ def _extract_account_candidates(raw_text: str | None) -> tuple[list[str], set[st
 	return (matches, cands, t)
 
 
+def _detect_account_anchor(raw_tsv: str) -> dict:
+	"""Detect the Account label anchor in original ACCOUNT ROI TSV.
+
+	Matches TSV tokens to the label "ACCOUNT" using narrow, deterministic
+	rules only. No fuzzy or contains matching.
+
+	Returns a dict with:
+	  anchor_found (bool)
+	  anchors (list of matched anchor dicts; expected 0 or 1)
+	  reason (str): EMPTY_TSV | NO_ANCHOR | MULTIPLE_ANCHORS | OK
+	"""
+
+	def _norm_token(s: str) -> str:
+		"""Narrow OCR-confusion normalization: only visually close chars in ACCOUNT."""
+		u = s.upper()
+		# 0 -> O, 1 -> I, | -> I  (characters likely confused in ACCOUNT glyphs)
+		u = u.replace("0", "O").replace("1", "I").replace("|", "I")
+		return u
+
+	if not raw_tsv or not raw_tsv.strip():
+		return {"anchor_found": False, "anchors": [], "reason": "EMPTY_TSV"}
+
+	# Parse TSV tokens.
+	tokens: list[dict] = []
+	for line in raw_tsv.splitlines():
+		if not line or not line.strip():
+			continue
+		cols = line.split("\t")
+		if len(cols) < 12:
+			continue
+		if cols[0].strip().lower() == "level":
+			continue
+		text = cols[11].strip()
+		if not text:
+			continue
+		try:
+			tok = {
+				"block_num": int(cols[2]),
+				"par_num": int(cols[3]),
+				"line_num": int(cols[4]),
+				"word_num": int(cols[5]),
+				"left": int(cols[6]),
+				"top": int(cols[7]),
+				"width": int(cols[8]),
+				"height": int(cols[9]),
+				"conf": float(cols[10]),
+				"text": text,
+			}
+		except Exception:
+			continue
+		tokens.append(tok)
+
+	# Group tokens by (block_num, par_num, line_num) for adjacent-join check.
+	lines_map: dict[tuple, list[dict]] = {}
+	for tok in tokens:
+		key = (tok["block_num"], tok["par_num"], tok["line_num"])
+		lines_map.setdefault(key, []).append(tok)
+	for key in lines_map:
+		lines_map[key].sort(key=lambda t: t["word_num"])
+
+	anchors: list[dict] = []
+	seen_line_keys: set[tuple] = set()
+
+	for tok in tokens:
+		text_raw = tok["text"]
+		text_u = text_raw.upper()
+		text_norm = _norm_token(text_raw)
+		match_mode: str | None = None
+
+		# Rule 1: exact single-token match.
+		if text_u == "ACCOUNT":
+			match_mode = "exact_token"
+
+		# Rule 2: single-token match after narrow OCR-confusion normalization.
+		elif text_norm == "ACCOUNT":
+			match_mode = "normalized_token"
+
+		# Rule 3: adjacent two-token join on same line concatenates to ACCOUNT.
+		else:
+			line_key = (tok["block_num"], tok["par_num"], tok["line_num"])
+			if line_key not in seen_line_keys:
+				line_toks = lines_map.get(line_key, [])
+				for i, lt in enumerate(line_toks[:-1]):
+					next_lt = line_toks[i + 1]
+					joined = _norm_token(lt["text"]) + _norm_token(next_lt["text"])
+					if joined == "ACCOUNT":
+						match_mode = "adjacent_join"
+						# Use first token as anchor representative.
+						tok = lt
+						text_raw = lt["text"]
+						text_norm = joined
+						break
+
+		if match_mode is not None:
+			line_key = (tok["block_num"], tok["par_num"], tok["line_num"])
+			if line_key not in seen_line_keys:
+				seen_line_keys.add(line_key)
+				anchors.append({
+					"text_raw": text_raw,
+					"text_normalized": text_norm,
+					"block_num": tok["block_num"],
+					"par_num": tok["par_num"],
+					"line_num": tok["line_num"],
+					"word_num": tok["word_num"],
+					"left": tok["left"],
+					"top": tok["top"],
+					"width": tok["width"],
+					"height": tok["height"],
+					"conf": tok["conf"],
+					"match_mode": match_mode,
+				})
+
+	if not anchors:
+		return {"anchor_found": False, "anchors": [], "reason": "NO_ANCHOR"}
+	if len(anchors) > 1:
+		return {"anchor_found": False, "anchors": anchors, "reason": "MULTIPLE_ANCHORS"}
+	return {"anchor_found": True, "anchors": anchors, "reason": "OK"}
+
+
 def _try_parse_total_from_tsv(raw_tsv: str) -> dict:
 	"""Parse total from Tesseract TSV output using strict anchor/candidate logic.
 
@@ -624,6 +743,32 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 		roi = section.get("account_no")
 		dpi = int((roi or {}).get("dpi") or 150)
 		pix = render_normalized_roi_to_pixmap(pdf_path, 0, dpi=dpi, roi=roi or {})
+		# ── Slice 1: Account anchor detection on original ROI TSV ────────────
+		_acct_tsv = ocr_pixmap_tsv(pix, psm=6, lang="eng")
+		_acct_tsv_preview = _tsv_preview(_acct_tsv)
+		_anchor_result = _detect_account_anchor(_acct_tsv)
+		_anchor_meta = _anchor_result["anchors"][0] if _anchor_result["anchor_found"] else None
+		_phase2_debug_log("PHASE2_ACCOUNT_ANCHOR", {
+			"pdf_path": pdf_path,
+			"file_type": file_type,
+			"roi": roi,
+			"dpi": (roi or {}).get("dpi"),
+			"source": "original_roi_tsv",
+			"existed": _acct_tsv is not None,
+			"non_empty": bool(_acct_tsv and _acct_tsv.strip()),
+			"preview": _acct_tsv_preview,
+			"anchor_found": _anchor_result["anchor_found"],
+			"anchor_count": len(_anchor_result["anchors"]),
+			"reason": _anchor_result["reason"],
+			"anchor": {
+				"text_raw": _anchor_meta["text_raw"],
+				"text_normalized": _anchor_meta["text_normalized"],
+				"line": (_anchor_meta["block_num"], _anchor_meta["par_num"], _anchor_meta["line_num"]),
+				"bbox": (_anchor_meta["left"], _anchor_meta["top"], _anchor_meta["width"], _anchor_meta["height"]),
+				"conf": _anchor_meta["conf"],
+				"match_mode": _anchor_meta["match_mode"],
+			} if _anchor_meta is not None else None,
+		})
 		# Cleaned/tightened OCR is the primary account read.
 		cleaned_raw = ""
 		raw = ""
