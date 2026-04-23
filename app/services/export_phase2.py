@@ -743,23 +743,59 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 		roi = section.get("account_no")
 		dpi = int((roi or {}).get("dpi") or 150)
 		pix = render_normalized_roi_to_pixmap(pdf_path, 0, dpi=dpi, roi=roi or {})
-		# ── Slice 1: Account anchor detection on original ROI TSV ────────────
-		_acct_tsv = ocr_pixmap_tsv(pix, psm=6, lang="eng")
-		_acct_tsv_preview = _tsv_preview(_acct_tsv)
-		_anchor_result = _detect_account_anchor(_acct_tsv)
+		# ── Slice 1+2: Account anchor detection on original ROI TSV ─────────
+		# Primary: original ROI TSV at psm=6.
+		_acct_tsv_psm6 = ocr_pixmap_tsv(pix, psm=6, lang="eng")
+		_acct_tsv_psm6_preview = _tsv_preview(_acct_tsv_psm6)
+		_anchor_result_psm6 = _detect_account_anchor(_acct_tsv_psm6)
+
+		# Slice 2 companion: original ROI TSV at psm=11, consulted only when
+		# primary psm=6 does not find an anchor.
+		_acct_tsv_psm11 = None
+		_acct_tsv_psm11_preview = ""
+		_anchor_result_psm11: dict = {"anchor_found": False, "anchors": [], "reason": "NOT_RUN"}
+		if not _anchor_result_psm6["anchor_found"]:
+			_acct_tsv_psm11 = ocr_pixmap_tsv(pix, psm=11, lang="eng")
+			_acct_tsv_psm11_preview = _tsv_preview(_acct_tsv_psm11)
+			_anchor_result_psm11 = _detect_account_anchor(_acct_tsv_psm11)
+
+		# Resolve final anchor: psm=6 wins; psm=11 used only on primary miss.
+		if _anchor_result_psm6["anchor_found"]:
+			_anchor_result = _anchor_result_psm6
+			_anchor_source_used = "original_psm6"
+		elif _anchor_result_psm11["anchor_found"]:
+			_anchor_result = _anchor_result_psm11
+			_anchor_source_used = "original_psm11"
+		else:
+			_anchor_result = _anchor_result_psm6  # carry primary non-found for reason
+			_anchor_source_used = "none"
+
 		_anchor_meta = _anchor_result["anchors"][0] if _anchor_result["anchor_found"] else None
 		_phase2_debug_log("PHASE2_ACCOUNT_ANCHOR", {
 			"pdf_path": pdf_path,
 			"file_type": file_type,
 			"roi": roi,
 			"dpi": (roi or {}).get("dpi"),
-			"source": "original_roi_tsv",
-			"existed": _acct_tsv is not None,
-			"non_empty": bool(_acct_tsv and _acct_tsv.strip()),
-			"preview": _acct_tsv_preview,
+			"primary": {
+				"source": "original_psm6",
+				"existed": _acct_tsv_psm6 is not None,
+				"non_empty": bool(_acct_tsv_psm6 and _acct_tsv_psm6.strip()),
+				"preview": _acct_tsv_psm6_preview,
+				"anchor_found": _anchor_result_psm6["anchor_found"],
+				"anchor_count": len(_anchor_result_psm6["anchors"]),
+				"reason": _anchor_result_psm6["reason"],
+			},
+			"companion": {
+				"source": "original_psm11",
+				"existed": _acct_tsv_psm11 is not None,
+				"non_empty": bool(_acct_tsv_psm11 and _acct_tsv_psm11.strip()),
+				"preview": _acct_tsv_psm11_preview,
+				"anchor_found": _anchor_result_psm11["anchor_found"],
+				"anchor_count": len(_anchor_result_psm11["anchors"]),
+				"reason": _anchor_result_psm11["reason"],
+			},
+			"anchor_source_used": _anchor_source_used,
 			"anchor_found": _anchor_result["anchor_found"],
-			"anchor_count": len(_anchor_result["anchors"]),
-			"reason": _anchor_result["reason"],
 			"anchor": {
 				"text_raw": _anchor_meta["text_raw"],
 				"text_normalized": _anchor_meta["text_normalized"],
