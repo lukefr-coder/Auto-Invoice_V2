@@ -805,6 +805,80 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 				"match_mode": _anchor_meta["match_mode"],
 			} if _anchor_meta is not None else None,
 		})
+		# ── Step 3a: Select immediate next-line value token (proven structure) ─
+		# Uses the winning TSV source only. No validation or reread yet.
+		# Supported: proven immediate-next-line cases only. All others fail closed.
+		_assoc_value_token: dict | None = None
+		_assoc_value_found = False
+		_assoc_value_reason = "NO_ANCHOR"
+		if _anchor_meta is not None:
+			_step3_tsv = _acct_tsv_psm6 if _anchor_source_used == "original_psm6" else _acct_tsv_psm11
+			_s3_block = _anchor_meta["block_num"]
+			_s3_par   = _anchor_meta["par_num"]
+			_s3_line  = _anchor_meta["line_num"]
+			_s3_toks: list[dict] = []
+			for _s3l in (_step3_tsv or "").splitlines():
+				if not _s3l or not _s3l.strip():
+					continue
+				_s3c = _s3l.split("\t")
+				if len(_s3c) < 12 or _s3c[0].strip().lower() == "level":
+					continue
+				_s3t = _s3c[11].strip()
+				if not _s3t:
+					continue
+				try:
+					_s3_toks.append({
+						"block_num": int(_s3c[2]),
+						"par_num":   int(_s3c[3]),
+						"line_num":  int(_s3c[4]),
+						"word_num":  int(_s3c[5]),
+						"left":      int(_s3c[6]),
+						"top":       int(_s3c[7]),
+						"width":     int(_s3c[8]),
+						"height":    int(_s3c[9]),
+						"conf":      float(_s3c[10]),
+						"text":      _s3t,
+					})
+				except Exception:
+					continue
+			# Candidates: same block+par, exactly next line, at least one alnum char.
+			_s3_next_line = [
+				_tk for _tk in _s3_toks
+				if (
+					_tk["block_num"] == _s3_block
+					and _tk["par_num"] == _s3_par
+					and _tk["line_num"] == _s3_line + 1
+					and any(c.isalnum() for c in _tk["text"])
+				)
+			]
+			if _s3_next_line:
+				_s3_chosen = min(_s3_next_line, key=lambda _tk: _tk["left"])
+				_assoc_value_token = _s3_chosen
+				_assoc_value_found = True
+				_assoc_value_reason = "OK"
+			else:
+				_assoc_value_reason = "NO_NEXT_LINE_VALUE"
+			_phase2_debug_log("PHASE2_ACCOUNT_STEP3A", {
+				"pdf_path": pdf_path,
+				"file_type": file_type,
+				"anchor_source_used": _anchor_source_used,
+				"anchor_line": (_s3_block, _s3_par, _s3_line),
+				"next_line_candidate_count": len(_s3_next_line),
+				"associated_value_found": _assoc_value_found,
+				"reason": _assoc_value_reason,
+				"token": {
+					"text":      _assoc_value_token["text"],
+					"block_num": _assoc_value_token["block_num"],
+					"par_num":   _assoc_value_token["par_num"],
+					"line_num":  _assoc_value_token["line_num"],
+					"word_num":  _assoc_value_token["word_num"],
+					"left":      _assoc_value_token["left"],
+					"top":       _assoc_value_token["top"],
+					"width":     _assoc_value_token["width"],
+					"height":    _assoc_value_token["height"],
+					"conf":      _assoc_value_token["conf"],
+				} if _assoc_value_token is not None else None,
+			})
 		# Cleaned/tightened OCR is the primary account read.
 		cleaned_raw = ""
 		raw = ""
