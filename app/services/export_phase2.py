@@ -879,6 +879,99 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 					"conf":      _assoc_value_token["conf"],
 				} if _assoc_value_token is not None else None,
 			})
+		# ── Step 3b: Anchor-guided below-region selection (unsupported cases) ─
+		# Runs only when anchor is found AND step-3a returned NO_NEXT_LINE_VALUE.
+		# Uses below-anchor geometry from the resolved anchor bbox.
+		# No right-of-anchor search. No validation or acceptance yet.
+		_s3b_attempted = False
+		_s3b_found = False
+		_s3b_reason = "NO_ANCHOR"
+		_s3b_box_policy: str | None = None
+		_s3b_box_coords: tuple | None = None
+		_s3b_region_raw: str | None = None
+		if _anchor_meta is not None and _assoc_value_reason == "NO_NEXT_LINE_VALUE":
+			_s3b_attempted = True
+			_a_left   = _anchor_meta["left"]
+			_a_top    = _anchor_meta["top"]
+			_a_w      = _anchor_meta["width"]
+			_a_h      = _anchor_meta["height"]
+			_a_right  = _a_left + _a_w
+			_a_bottom = _a_top + _a_h
+			try:
+				_s3b_gray = pixmap_to_pil_gray(pix)
+				_roi_w, _roi_h = _s3b_gray.size
+				def _clamp_box(x0f, y0f, x1f, y1f):
+					return (
+						max(0, int(x0f)),
+						max(0, int(y0f)),
+						min(_roi_w, int(x1f)),
+						min(_roi_h, int(y1f)),
+					)
+				# Box 1 (tight).
+				_b1 = _clamp_box(
+					_a_left  - 0.20 * _a_w,
+					_a_bottom + 0.15 * _a_h,
+					_a_right + 0.40 * _a_w,
+					_a_bottom + 0.15 * _a_h + 2.20 * _a_h,
+				)
+				_s3b_text = ""
+				_box_used = None
+				if _b1[2] > _b1[0] and _b1[3] > _b1[1]:
+					_b1_crop = _s3b_gray.crop(_b1)
+					_b1_raw = ocr_pil_image(
+						_b1_crop, psm=8, lang="eng",
+						whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$",
+					).strip()
+					if _b1_raw and any(c.isalnum() for c in _b1_raw):
+						_s3b_text = _b1_raw
+						_box_used = "below_box_1"
+						_s3b_box_coords = _b1
+				if not _s3b_text:
+					# Box 2 (wider/taller fallback).
+					_b2 = _clamp_box(
+						_a_left  - 0.30 * _a_w,
+						_a_bottom + 0.10 * _a_h,
+						_a_right + 0.55 * _a_w,
+						_a_bottom + 0.10 * _a_h + 2.80 * _a_h,
+					)
+					if _b2[2] > _b2[0] and _b2[3] > _b2[1]:
+						_b2_crop = _s3b_gray.crop(_b2)
+						_b2_raw = ocr_pil_image(
+							_b2_crop, psm=8, lang="eng",
+							whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$",
+						).strip()
+						if _b2_raw and any(c.isalnum() for c in _b2_raw):
+							_s3b_text = _b2_raw
+							_box_used = "below_box_2"
+							_s3b_box_coords = _b2
+						else:
+							_box_used = "below_box_2"
+							_s3b_box_coords = _b2
+							_s3b_reason = "BOX2_EMPTY" if not _b2_raw else "NO_USABLE_REGION_TEXT"
+					else:
+						_s3b_reason = "BOX1_EMPTY"
+				if _s3b_text:
+					_s3b_region_raw = _s3b_text
+					_s3b_box_policy = _box_used
+					_s3b_found = True
+					_s3b_reason = "OK"
+				elif _box_used is None:
+					_s3b_reason = "BOX1_EMPTY"
+				else:
+					_s3b_box_policy = _box_used
+			except Exception:
+				_s3b_reason = "NO_USABLE_REGION_TEXT"
+			_phase2_debug_log("PHASE2_ACCOUNT_STEP3B", {
+				"pdf_path": pdf_path,
+				"file_type": file_type,
+				"step3b_attempted": _s3b_attempted,
+				"anchor_source_used": _anchor_source_used,
+				"box_policy_used": _s3b_box_policy,
+				"box_coords": _s3b_box_coords,
+				"region_ocr_raw": _s3b_region_raw,
+				"associated_value_found": _s3b_found,
+				"reason": _s3b_reason,
+			})
 		# Cleaned/tightened OCR is the primary account read.
 		cleaned_raw = ""
 		raw = ""
