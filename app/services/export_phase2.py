@@ -972,6 +972,166 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 				"associated_value_found": _s3b_found,
 				"reason": _s3b_reason,
 			})
+		# ── Step 4+5: Post-selection acceptance and narrow first-char reread ────
+		# Consumes step-3 output as primary candidate source.
+		# Strict acceptance first; narrow reread only for first-character
+		# ambiguity (len==5, positions 2-5 all digits, position 1 not A-Z).
+		# A valid result here short-circuits the legacy cleaned/raw path.
+		# Outcomes are classified into four explicit states:
+		#   RESOLVED_STRICT_ACCEPT            -- step-3 text already matched [A-Z][0-9]{4}
+		#   RESOLVED_REREAD_ACCEPT            -- non-confusable reread accepted
+		#   UNRESOLVED_CONFUSABLE_FAIL_CLOSED -- confusable I/L/T, no corroboration
+		#   UNRESOLVED_GENERIC_FAIL_CLOSED    -- all other unresolved states
+		_s45_cand: str | None = None
+		_s45_selection_source: str | None = None
+		_s45_selected_text: str | None = None
+		_s45_strict_accepted = False
+		_s45_reread_triggered = False
+		_s45_reread_region_source: str | None = None
+		_s45_subcrop_used: str | None = None
+		_s45_subcrop_raw: str | None = None
+		_s45_reread_char: str | None = None
+		_s45_reconstructed: str | None = None
+		_s45_confusable_blocked = False
+		_s45_reread_accepted = False
+		_s45_accepted_account: str | None = None
+		_s45_reason = "NO_STEP3_OUTPUT"
+		_s45_outcome = "UNRESOLVED_GENERIC_FAIL_CLOSED"
+		_s45_legacy_bypassed = False
+		# Determine step-3 selected text and source.
+		if _assoc_value_found and _assoc_value_token is not None:
+			_s45_selection_source = "step_3a"
+			_s45_selected_text = _assoc_value_token["text"]
+		elif _s3b_found and _s3b_region_raw:
+			_s45_selection_source = "step_3b"
+			_s45_selected_text = _s3b_region_raw
+		if _s45_selected_text is not None:
+			# Narrow end-trim: remove non-alnum junk at string ends only.
+			_s45_cand = re.sub(r"^[^A-Z0-9]+|[^A-Z0-9]+$", "", _s45_selected_text.upper())
+			if re.match(r"^[A-Z][0-9]{4}$", _s45_cand):
+				# Already strictly valid -- accept directly.
+				_s45_accepted_account = _s45_cand
+				_s45_strict_accepted = True
+				_s45_reason = "STRICT_ACCEPT"
+				_s45_outcome = "RESOLVED_STRICT_ACCEPT"
+			else:
+				# Narrow reread trigger: exactly 5 chars, positions 2-5 all
+				# digits, position 1 NOT an uppercase letter A-Z, no spaces.
+				_s45_trigger = (
+					len(_s45_cand) == 5
+					and _s45_cand[1:].isdigit()
+					and not _s45_cand[0].isalpha()
+					and " " not in _s45_cand
+				)
+				if _s45_trigger:
+					_s45_reread_triggered = True
+					_s45_reread_region_source = "none"
+					try:
+						_s45_gray = pixmap_to_pil_gray(pix)
+						_s45_roi_w, _s45_roi_h = _s45_gray.size
+						_rx0 = _ry0 = _rx1 = _ry1 = 0
+						if _s45_selection_source == "step_3a" and _assoc_value_token is not None:
+							_rtk = _assoc_value_token
+							_rx0 = max(0, _rtk["left"])
+							_ry0 = max(0, _rtk["top"])
+							_rx1 = min(_s45_roi_w, _rtk["left"] + _rtk["width"])
+							_ry1 = min(_s45_roi_h, _rtk["top"] + _rtk["height"])
+							_s45_reread_region_source = "step_3a_token_bbox"
+						elif _s45_selection_source == "step_3b" and _s3b_box_coords is not None:
+							_rx0 = _s3b_box_coords[0]
+							_ry0 = _s3b_box_coords[1]
+							_rx1 = _s3b_box_coords[2]
+							_ry1 = _s3b_box_coords[3]
+							_s45_reread_region_source = "step_3b_box_coords"
+						if _rx1 > _rx0 and _ry1 > _ry0:
+							_s45_sel_region = _s45_gray.crop((_rx0, _ry0, _rx1, _ry1))
+							_sel_rw = _rx1 - _rx0
+							_sel_rh = _ry1 - _ry0
+							# First-character-focused ordered 2-crop policy.
+							# Crop A: x 0.00-0.42, y 0.05-0.95 of selected region.
+							# Crop B: x 0.06-0.48, y 0.05-0.95 (only if A yields no char).
+							def _try_first_char_crop(region, xa0_f, xa1_f):
+								_cx0 = int(xa0_f * _sel_rw)
+								_cx1 = int(xa1_f * _sel_rw)
+								_cy0 = int(0.05 * _sel_rh)
+								_cy1 = int(0.95 * _sel_rh)
+								if _cx1 <= _cx0 or _cy1 <= _cy0:
+									return None, None
+								_sub = region.crop((_cx0, _cy0, _cx1, _cy1))
+								_raw = ocr_pil_image(
+									_sub, psm=10, lang="eng",
+									whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+								).strip().upper()
+								_ch = _raw[:1] if _raw and _raw[:1].isalpha() else None
+								return _ch, _raw
+							_char_a, _raw_a = _try_first_char_crop(_s45_sel_region, 0.00, 0.42)
+							if _char_a:
+								_s45_subcrop_used = "crop_a"
+								_s45_subcrop_raw = _raw_a
+								_s45_reread_char = _char_a
+							else:
+								_char_b, _raw_b = _try_first_char_crop(_s45_sel_region, 0.06, 0.48)
+								if _char_b:
+									_s45_subcrop_used = "crop_b"
+									_s45_subcrop_raw = _raw_b
+									_s45_reread_char = _char_b
+								else:
+									_s45_subcrop_used = "none"
+									_s45_subcrop_raw = _raw_b
+							# Reconstruct using reread char + original chars 2-5.
+							# Confusable leading-letter class I/L/T: no corroboration
+							# is available in this slice; surface as UNRESOLVED_CONFUSABLE
+							# for a later confidence/arbitration layer.
+							_S45_CONFUSABLE = frozenset("ILT")
+							if _s45_reread_char:
+								_s45_reconstructed = _s45_reread_char + _s45_cand[1:]
+								if _s45_reread_char in _S45_CONFUSABLE:
+									_s45_confusable_blocked = True
+									_s45_reason = "REREAD_CONFUSABLE_FAIL_CLOSED"
+									_s45_outcome = "UNRESOLVED_CONFUSABLE_FAIL_CLOSED"
+								elif re.match(r"^[A-Z][0-9]{4}$", _s45_reconstructed):
+									_s45_accepted_account = _s45_reconstructed
+									_s45_reread_accepted = True
+									_s45_reason = "REREAD_ACCEPT"
+									_s45_outcome = "RESOLVED_REREAD_ACCEPT"
+								else:
+									_s45_reason = "REREAD_FAIL_CLOSED"
+									_s45_outcome = "UNRESOLVED_GENERIC_FAIL_CLOSED"
+							else:
+								_s45_reason = "REREAD_NO_CHAR"
+								_s45_outcome = "UNRESOLVED_GENERIC_FAIL_CLOSED"
+						else:
+							_s45_reason = "REREAD_NO_REGION"
+							_s45_outcome = "UNRESOLVED_GENERIC_FAIL_CLOSED"
+					except Exception:
+						_s45_reason = "REREAD_ERROR"
+						_s45_outcome = "UNRESOLVED_GENERIC_FAIL_CLOSED"
+				else:
+					_s45_reason = "NOT_REREAD_TRIGGER"
+					_s45_outcome = "UNRESOLVED_GENERIC_FAIL_CLOSED"
+		if _s45_accepted_account is not None:
+			account_str = _s45_accepted_account
+			_s45_legacy_bypassed = True
+		_phase2_debug_log("PHASE2_ACCOUNT_STEP45", {
+			"pdf_path": pdf_path,
+			"file_type": file_type,
+			"selection_source": _s45_selection_source,
+			"selected_text": _s45_selected_text,
+			"candidate_after_trim": _s45_cand,
+			"strict_accepted": _s45_strict_accepted,
+			"reread_triggered": _s45_reread_triggered,
+			"reread_region_source": _s45_reread_region_source,
+			"subcrop_used": _s45_subcrop_used,
+			"subcrop_raw": _s45_subcrop_raw,
+			"reread_char": _s45_reread_char,
+			"reconstructed_candidate": _s45_reconstructed,
+			"confusable_blocked": _s45_confusable_blocked,
+			"reread_accepted": _s45_reread_accepted,
+			"accepted_account": _s45_accepted_account,
+			"outcome": _s45_outcome,
+			"reason": _s45_reason,
+			"legacy_bypassed": _s45_legacy_bypassed,
+		})
 		# Cleaned/tightened OCR is the primary account read.
 		cleaned_raw = ""
 		raw = ""
@@ -999,7 +1159,7 @@ def extract_phase2_fields(pdf_path: str, file_type: FileType) -> tuple[str, str,
 			raw = ocr_pixmap(pix, psm=6, lang="eng")
 			matches, cands, t = _extract_account_candidates(raw)
 
-		if len(cands) == 1:
+		if len(cands) == 1 and account_str == "!":
 			account_str = next(iter(cands))
 		if account_str == "!":
 			reason = "UNKNOWN_ACCOUNT_FAIL"
